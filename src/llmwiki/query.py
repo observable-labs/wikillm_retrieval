@@ -13,6 +13,7 @@ room to write. Pages are added in rank order and truncated individually at
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .budget import compute_context_budget, trim_long_text
@@ -39,6 +40,21 @@ Rules:
   them into vagueness.
 """
 
+ANSWER_SHAPE = r"""
+Shape:
+- Lead with a direct answer in one or two sentences. Elaborate after it, not before it.
+- Then the supporting detail, as short paragraphs or a single-level bullet list — whichever the
+  material fits. Don't nest bullets more than one level, and don't add section headings.
+- Plain Markdown, read in a terminal that does not render it. No LaTeX or math delimiters: write
+  PrP^C, not $\text{PrP}^\text{C}$. No tables unless the question asks you to compare things.
+- Don't write a Sources or References section. The tool prints one from the numbers you cite.
+"""
+
+# `[1]`, and the `[1][2]` / `[1], [3]` runs models write when one claim rests on
+# several pages. A markdown link's `[1](path)` matches too, which is correct —
+# the page was still cited.
+CITATION_MARKER = re.compile(r"\[(\d+)\]")
+
 
 @dataclass
 class Citation:
@@ -48,6 +64,7 @@ class Citation:
     kind: str
     score: float
     graph_related_to: list[str] = field(default_factory=list)
+    cited: bool = False
 
 
 @dataclass
@@ -57,6 +74,7 @@ class Answer:
     citations: list[Citation] = field(default_factory=list)
     retrieval: SearchResponse | None = None
     pages_used: int = 0
+    pages_cited: int = 0
     pages_found: int = 0
     context_chars: int = 0
     notes: list[str] = field(default_factory=list)
@@ -103,6 +121,7 @@ def ask(
         for part in (
             SYSTEM_HEADER,
             CITATION_RULES.strip(),
+            ANSWER_SHAPE.strip(),
             f"## Wiki Purpose\n{purpose}" if purpose.strip() else "",
             f"## Wiki Index\n{index}" if index.strip() else "",
         )
@@ -138,16 +157,34 @@ def ask(
         on_token=on_token,
     )
 
+    text = completion.text.strip()
+    cited = _mark_cited(text, citations)
+
     return Answer(
         question=question,
-        text=completion.text.strip(),
+        text=text,
         citations=citations,
         retrieval=response,
         pages_used=len(citations),
+        pages_cited=cited,
         pages_found=len(response.results),
         context_chars=len(packed),
         notes=response.notes,
     )
+
+
+def _mark_cited(text: str, citations: list[Citation]) -> int:
+    """Flag the packed pages the answer actually referenced; return how many.
+
+    `_pack_context` numbers every page it packs, which is what the model needs
+    to cite. It is not the answer's bibliography: a twenty-page context
+    routinely yields a four-page answer, and presenting all twenty as sources
+    overstates what the answer rests on and buries the four that carry it.
+    """
+    referenced = {int(number) for number in CITATION_MARKER.findall(text)}
+    for citation in citations:
+        citation.cited = citation.number in referenced
+    return sum(1 for citation in citations if citation.cited)
 
 
 def _pack_context(

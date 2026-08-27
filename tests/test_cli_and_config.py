@@ -206,3 +206,36 @@ def test_read_only_commands_still_discover_the_project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path / "w")
     assert main(["status", "--json"]) == 0
     assert main(["search", "storage", "--json"]) == 0
+
+
+def test_ask_lists_the_cited_pages_and_summarizes_the_rest(tmp_path, capsys, monkeypatch):
+    main(["init", str(tmp_path / "w"), "--quiet"])
+    project = open_project(tmp_path / "w")
+    for name in ("alpha", "beta", "gamma"):
+        project.write(
+            f"wiki/concepts/{name}.md",
+            f"---\ntype: concept\ntitle: {name.title()}\n---\n\n# {name}\n\nStorage notes.\n",
+        )
+
+    from llmwiki.llm.base import Completion
+
+    class _Stub:
+        def complete(self, messages, *, max_tokens, on_token=None):
+            return Completion(text="Storage, in short [2].", model="stub")
+
+    monkeypatch.setattr("llmwiki.query.build_client", lambda _cfg: _Stub())
+    assert main(["ask", "storage", "-p", str(tmp_path / "w")]) == 0
+
+    err = capsys.readouterr().err
+    assert "[2] wiki/concepts/beta.md" in err
+    assert "alpha" not in err and "gamma" not in err
+    assert "+2 retrieved pages the answer didn't cite" in err
+    assert "3 packed · 1 cited" in err
+
+
+def test_graph_annotations_are_capped(tmp_path):
+    from llmwiki.cli import _via
+
+    assert _via([]) == ""
+    assert _via(["One", "Two"]) == "  (via One, Two)"
+    assert _via(["A", "B", "C", "D", "E"]) == "  (via A, B, C +2 more)"

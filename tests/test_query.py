@@ -92,3 +92,40 @@ def test_packing_respects_the_page_budget_and_renumbers():
     assert [c.path for c in citations] == ["wiki/a.md", "wiki/c.md"]
     assert [c.number for c in citations] == [1, 2]
     assert len(packed) <= 400
+
+
+def test_only_the_pages_the_answer_cited_are_marked(wiki, settings, stub_llm):
+    """The context is numbered for the model's benefit, not as a bibliography.
+
+    Twenty packed pages routinely yield a four-page answer; treating the whole
+    packed list as sources overstates what the answer rests on.
+    """
+    for name in ("alpha", "beta", "gamma"):
+        _page(wiki, f"wiki/concepts/{name}.md", name.title(), f"Storage notes about {name}.")
+
+    stub_llm({"answer": "Storage is covered [2], and see also [2][3] together."})
+    answer = ask(wiki, "storage", settings)
+
+    assert answer.pages_used == 3, "all three were packed into the context"
+    assert answer.pages_cited == 2
+    assert [c.number for c in answer.citations if c.cited] == [2, 3]
+
+
+def test_uncited_answers_leave_every_page_unmarked(wiki, settings, stub_llm):
+    _page(wiki, "wiki/concepts/storage.md", "Storage", "Storage notes.")
+    stub_llm({"answer": "No citations here at all."})
+    answer = ask(wiki, "storage", settings)
+
+    assert answer.pages_cited == 0
+    assert not any(c.cited for c in answer.citations)
+
+
+def test_the_model_is_told_the_output_is_read_in_a_terminal(wiki, settings, stub_llm):
+    """Without this the model emits LaTeX and headings into a plain terminal."""
+    _page(wiki, "wiki/concepts/storage.md", "Storage", "Storage notes.")
+    client = stub_llm({"answer": "ok [1]"})
+    ask(wiki, "storage", settings)
+
+    system = client.prompt("answer")
+    assert "No LaTeX" in system
+    assert "Sources or References section" in system

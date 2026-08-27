@@ -57,20 +57,27 @@ packed context.
 ```
 Sources:
   [1] wiki/concepts/round-trip-efficiency.md
-  [2] wiki/sources/flow-batteries.md
   [3] wiki/entities/vanadium-flow-battery.md  (via round-trip-efficiency)
   [4] raw/sources/flow-batteries.md
+  (+1 retrieved page the answer didn't cite)
 
-  keyword retrieval · 4 of 4 matches used · 2,152 chars of context
+  keyword retrieval · 9 matched · 4 packed · 3 cited · 2,152 chars of context
 ```
 
+- Only the pages the answer actually cited are listed, so the numbers are
+  **not contiguous** — `[2]` is missing above because nothing in the answer
+  referenced it. Use `--json` (every citation, each with `"cited"`) or `search`
+  to see the full packed context.
 - `wiki/…` are compiled pages; `raw/sources/…` is original document text, scored
   lower on purpose so the compiled layer stays the answer layer.
 - `(via …)` marks a page pulled in by **graph expansion** — it didn't match the
   query itself, a page that did links to it. This is the mechanism that makes the
-  wiki more than keyword search, and it's a real signal when it fires.
-- **`N of M matches used`** — if used is well below found, pages were dropped at
-  the budget boundary. Raise `--max-context` or narrow the question.
+  wiki more than keyword search, and it's a real signal when it fires. The list is
+  capped at three neighbours; `search` prints all of them.
+- **`matched → packed → cited`** narrows at each step. Packed well below matched
+  means pages were dropped at the budget boundary — raise `--max-context` or
+  narrow the question. Cited well below packed is normal; cited at 1 or 2 out of
+  twenty means retrieval brought back the wrong neighbourhood.
 - **mode** is `keyword` unless a vector index exists, then `hybrid`.
 
 Answers are grounded in retrieved text. When you relay one to the user, keep the

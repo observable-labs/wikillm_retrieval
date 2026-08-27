@@ -210,6 +210,7 @@ def cmd_ask(args, printer: Printer) -> int:
                             "path": c.path,
                             "title": c.title,
                             "kind": c.kind,
+                            "cited": c.cited,
                             "related_via": c.graph_related_to,
                         }
                         for c in answer.citations
@@ -218,6 +219,7 @@ def cmd_ask(args, printer: Printer) -> int:
                         "mode": answer.retrieval.mode if answer.retrieval else "none",
                         "pages_found": answer.pages_found,
                         "pages_used": answer.pages_used,
+                        "pages_cited": answer.pages_cited,
                     },
                     "notes": answer.notes,
                 },
@@ -234,20 +236,38 @@ def cmd_ask(args, printer: Printer) -> int:
     for note in answer.notes:
         printer.warn(note)
     if answer.citations:
+        cited = [c for c in answer.citations if c.cited]
         printer.info("")
         printer.info("Sources:")
-        for citation in answer.citations:
-            suffix = (
-                f"  (via {', '.join(citation.graph_related_to)})" if citation.graph_related_to else ""
-            )
-            printer.info(f"  [{citation.number}] {citation.path}{suffix}")
+        # A model that cites nothing still gets a source list — better an
+        # over-long one than an answer with no way back to the pages.
+        for citation in cited or answer.citations:
+            printer.info(f"  [{citation.number}] {citation.path}{_via(citation.graph_related_to)}")
+        uncited = len(answer.citations) - len(cited)
+        if cited and uncited:
+            noun = "page" if uncited == 1 else "pages"
+            printer.info(f"  (+{uncited} retrieved {noun} the answer didn't cite)")
         mode = answer.retrieval.mode if answer.retrieval else "keyword"
         printer.info("")
         printer.status(
-            f"{mode} retrieval · {answer.pages_used} of {answer.pages_found} matches used "
-            f"· {answer.context_chars:,} chars of context"
+            f"{mode} retrieval · {answer.pages_found} matched · {answer.pages_used} packed "
+            f"· {answer.pages_cited} cited · {answer.context_chars:,} chars of context"
         )
     return 0
+
+
+def _via(names: list[str], limit: int = 3) -> str:
+    """The graph neighbours a page was reached through, capped.
+
+    A hub page is linked from nearly every other result, so the full list runs
+    to a dozen titles on one line and buries the citation it annotates. Three
+    names carry the signal — that graph expansion fired, and roughly from
+    where; `search` prints the complete list for when that isn't enough.
+    """
+    if not names:
+        return ""
+    rest = len(names) - limit
+    return f"  (via {', '.join(names[:limit])}{f' +{rest} more' if rest > 0 else ''})"
 
 
 def cmd_search(args, printer: Printer) -> int:

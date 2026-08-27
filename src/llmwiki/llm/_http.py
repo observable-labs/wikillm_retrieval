@@ -73,6 +73,12 @@ def _error_detail(exc: urllib.error.HTTPError) -> str:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         return raw[:300]
+    # Not every endpoint returns a JSON object here. Gemini's OpenAI-compatible
+    # surface answers an unauthenticated request with a top-level *list*, and
+    # calling .get on it turned a plain "no API key" into an AttributeError
+    # traceback — the error path crashing instead of reporting the error.
+    if not isinstance(parsed, dict):
+        return str(parsed)[:300]
     error = parsed.get("error")
     if isinstance(error, dict):
         return str(error.get("message") or error)

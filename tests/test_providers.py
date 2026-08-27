@@ -6,8 +6,10 @@ error surfacing, URL derivation, and the embeddings batch contract.
 
 from __future__ import annotations
 
+import io
 import json
 import threading
+import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -15,6 +17,7 @@ import pytest
 from llmwiki.config import EmbeddingConfig, LLMConfig
 from llmwiki.embeddings import embed_texts
 from llmwiki.errors import ProviderError
+from llmwiki.llm._http import _error_detail
 from llmwiki.llm.base import Message
 from llmwiki.llm.openai_client import OpenAICompatibleChatClient, _chat_url
 
@@ -164,3 +167,26 @@ def test_embeddings_batch_and_ordering(server):
 def test_embeddings_require_configuration():
     with pytest.raises(Exception, match="not configured"):
         embed_texts(["a"], EmbeddingConfig())
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ('{"error": {"message": "credit balance is too low"}}', "credit balance is too low"),
+        ('{"error": "flat string"}', "flat string"),
+        # Gemini's OpenAI-compatible surface answers an unauthenticated request
+        # with a top-level list. `.get` on it raised AttributeError, so the
+        # error path crashed with a traceback instead of reporting the error.
+        ('[{"error": {"message": "API key not valid", "code": 400}}]', "API key not valid"),
+        ("not json at all", "not json at all"),
+    ],
+)
+def test_error_bodies_are_reported_not_raised(body, expected):
+    exc = urllib.error.HTTPError(
+        "http://example.test/v1/chat/completions",
+        400,
+        "Bad Request",
+        {},  # type: ignore[arg-type]
+        io.BytesIO(body.encode()),
+    )
+    assert expected in _error_detail(exc)

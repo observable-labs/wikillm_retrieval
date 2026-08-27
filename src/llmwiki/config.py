@@ -5,8 +5,13 @@ Precedence, lowest to highest:
     built-in defaults
     ~/.config/llmwiki/config.json          (user)
     <project>/.llm-wiki/config.json        (project)
+    .env files                             (see dotenv.py for the search order)
     LLMWIKI_* environment variables
     CLI flags
+
+`.env` sits directly below the real environment because that is where it
+would land if the user had run `set -a; . ./.env` themselves — the file
+supplies variables, it does not outrank ones already exported.
 
 Nothing here talks to a network; `llm.build_client` turns an `LLMConfig`
 into a live client.
@@ -19,6 +24,7 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .dotenv import load_dotenv
 from .errors import ConfigError
 
 ANTHROPIC = "anthropic"
@@ -164,6 +170,10 @@ def load(
     overrides: dict | None = None,
 ) -> Settings:
     """Assemble settings from files, environment, and explicit overrides."""
+    # Before the first `_env()` read: everything below resolves against
+    # os.environ, so the `.env` values have to be in place by now.
+    load_dotenv(project_dir)
+
     merged: dict = {}
     merged.update(_load_json(user_config_path()))
     if project_dir is not None:

@@ -1,0 +1,40 @@
+# Template for .env — copy to .env and fill in the key:
+#
+#     cp env-template.txt .env && chmod 600 .env
+#
+# .env is gitignored; this template is safe to commit.
+#
+# llmwiki loads this file automatically — no `set -a; . ./.env` needed.
+# It looks in <project>/.env, then $PWD/.env and its parents (stopping
+# below $HOME), then ~/.config/llmwiki/.env. Anything already exported in
+# the shell wins over the file. See the `.env files` section of the README.
+#
+# Paste your Gemini API key below (no quotes needed).
+# Get one at https://aistudio.google.com/apikey
+GEMINI_API_KEY=
+
+# ── Everything below is derived from the key above; no need to edit. ─────────
+#
+# Gemini is reached through its OpenAI-compatible surface, so llmwiki's
+# `openai` provider handles it with no code change and no Gemini-specific
+# adapter.
+#
+# The URLs below are deliberately the FULL endpoint paths, not the API base.
+# llmwiki appends `/v1/...` only when the configured base doesn't already end
+# in the endpoint itself (see `_chat_url` in src/llmwiki/llm/openai_client.py
+# and `_embeddings_url` in src/llmwiki/embeddings.py). Gemini's base is
+# `/v1beta/openai/`, which would otherwise be rewritten into the non-existent
+# `/v1beta/openai/v1/chat/completions`.
+
+LLMWIKI_PROVIDER=openai
+LLMWIKI_API_KEY="$GEMINI_API_KEY"
+LLMWIKI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+LLMWIKI_MODEL=gemini-3.7-flash
+
+# Optional vector lane — turns on retrieval phase 1.5 (vector search over chunk
+# embeddings) and the RRF fusion in phase 2. Comment out LLMWIKI_EMBEDDING_MODEL
+# to fall back to keyword + graph retrieval only.
+LLMWIKI_EMBEDDING_MODEL=gemini-embedding-2
+LLMWIKI_EMBEDDING_API_KEY="$GEMINI_API_KEY"
+LLMWIKI_EMBEDDING_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/embeddings
+LLMWIKI_EMBEDDING_DIMENSIONS=768

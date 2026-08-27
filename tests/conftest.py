@@ -69,6 +69,24 @@ class StubClient:
         raise AssertionError(f"phase {phase!r} was never called; saw {self.phases()}")
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_dotenv(monkeypatch):
+    """Keep the developer's own `.env` out of the suite.
+
+    `config.load` walks up from `$PWD` looking for `.env`, and pytest runs
+    from the repo root — where a working `.env` usually sits. Without this,
+    tests that assert on provider detection pass or fail depending on whether
+    the machine happens to be configured, and a test run quietly loads real
+    credentials.
+
+    Stubbing the function rather than setting `LLMWIKI_DOTENV=0` is
+    deliberate: several modules have their own autouse fixture that deletes
+    every `LLMWIKI_*` variable, which would erase an env-var guard before the
+    test body ran. `tests/test_dotenv.py` puts the real loader back.
+    """
+    monkeypatch.setattr(config, "load_dotenv", lambda project_dir=None: None)
+
+
 @pytest.fixture
 def stub_llm(monkeypatch):
     def install(responses: dict[str, object]) -> StubClient:

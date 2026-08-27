@@ -151,10 +151,11 @@ what's in the project and how it's configured.
 ## Configuration
 
 Precedence: defaults → `~/.config/llmwiki/config.json` →
-`<project>/.llm-wiki/config.json` → environment → CLI flags.
+`<project>/.llm-wiki/config.json` → `.env` → environment → CLI flags.
 
 | Variable | Meaning |
 |---|---|
+| `LLMWIKI_DOTENV` | path to a specific `.env`, or `0` to disable `.env` loading |
 | `LLMWIKI_STRICT_PROJECT` | `0` lets `add` and `ask` discover a project instead of requiring `--project` (default: on) |
 | `LLMWIKI_PROJECT` | default project directory, once strict mode is off — read *before* the config files, since it decides which project's config gets loaded |
 | `LLMWIKI_PROVIDER` | `anthropic` (default) or `openai` |
@@ -165,6 +166,34 @@ Precedence: defaults → `~/.config/llmwiki/config.json` →
 | `LLMWIKI_EFFORT` | Anthropic `output_config.effort` |
 | `LLMWIKI_EMBEDDING_MODEL` | enables the vector lane |
 | `LLMWIKI_EMBEDDING_BASE_URL` | OpenAI-compatible `/v1/embeddings` |
+
+### `.env` files
+
+Those variables are read from a `.env` file if one is found, so credentials
+don't have to be exported by hand in every shell. The search runs in this
+order, and the first file to define a name wins:
+
+```
+$LLMWIKI_DOTENV                  explicit path; skips the rest
+<project>/.env                   travels with the wiki
+$PWD/.env, then each parent      stops below $HOME
+~/.config/llmwiki/.env           user-global
+```
+
+A variable already exported in the shell is never overwritten, so `.env` is a
+floor rather than a ceiling — `LLMWIKI_MODEL=x llmwiki ask …` still wins.
+`LLMWIKI_DOTENV=0` turns loading off entirely.
+
+The syntax is the intersection of what shells and dotenv libraries agree on:
+`KEY=value`, an optional `export` prefix, `#` comments, single quotes
+(literal), double quotes (with `\n`-style escapes), and `$VAR` / `${VAR}`
+expansion against earlier lines and the real environment. A line that doesn't
+parse is reported on stderr rather than skipped in silence. Multi-line values
+and command substitution are not supported. `chmod 600` the file if it holds a
+key; `.env` should be in your `.gitignore`.
+
+`LLMWIKI_STRICT_PROJECT` is deliberately excluded: it decides *which* project
+to open, so it can't be read from a file found by way of the project.
 
 The Anthropic lane uses the official SDK with adaptive thinking and
 streaming. The OpenAI-compatible lane is stdlib-only and speaks

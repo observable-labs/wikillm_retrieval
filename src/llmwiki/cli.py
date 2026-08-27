@@ -385,6 +385,7 @@ def cmd_status(args, printer: Printer) -> int:
                     "ingested": cache.identities(),
                     "provider": settings.llm.provider,
                     "model": settings.llm.model or "(default)",
+                    "effort": _effort_summary(settings.llm),
                     "embedding_model": settings.embedding.model or None,
                     "vectors": vector_summary,
                 },
@@ -398,6 +399,8 @@ def cmd_status(args, printer: Printer) -> int:
     printer.info(f"sources   {len(sources)} under raw/sources/ ({len(cache.identities())} ingested)")
     printer.info(f"provider  {settings.llm.provider} · {settings.llm.model or '(default)'}")
     printer.info(f"context   {settings.llm.max_context_size:,} chars")
+    effort = _effort_summary(settings.llm)
+    printer.info(f"thinking  ask {effort['ask']} · ingest {effort['ingest']}")
     printer.info(
         f"vectors   {vector_summary}"
         + (f" · {settings.embedding.model}" if settings.embedding.model else " (disabled)")
@@ -406,6 +409,22 @@ def cmd_status(args, printer: Printer) -> int:
 
 
 # ── plumbing ──────────────────────────────────────────────────────────────
+
+def _effort_summary(llm) -> dict[str, str]:
+    """What each lane will actually ask the model for.
+
+    Worth printing: `effort` was configurable long before anything outside
+    the Anthropic client read it, so a value set in `.env` looked applied
+    while every OpenAI-compatible call ignored it.
+    """
+    from .reasoning import resolve
+
+    model = llm.model
+    return {
+        "ask": resolve(llm.effort, model) or "provider default",
+        "ingest": resolve(llm.for_ingest().effort, model) or "provider default",
+    }
+
 
 def _overrides(args) -> dict:
     return {

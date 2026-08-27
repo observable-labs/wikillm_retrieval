@@ -4,6 +4,11 @@ One adapter covers OpenAI, OpenRouter, Ollama, LM Studio, vLLM, and most
 gateways — they all speak the same request shape. Streaming is used so long
 generations don't sit behind a single socket read, and because it gives the
 CLI live output for `ask`.
+
+`reasoning_effort` is sent when `reasoning.resolve` yields one. It matters
+more than it looks: on a thinking model `max_tokens` bounds reasoning *and*
+content together, so an unbounded thinker can exhaust the ceiling and return
+nothing — which arrives here as the empty-response error below.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from typing import Iterable
 
 from ..config import LLMConfig
 from ..errors import ProviderError
+from ..reasoning import resolve as resolve_effort
 from .base import Completion, Message, TokenCallback
 from ._http import post_sse
 
@@ -21,6 +27,7 @@ class OpenAICompatibleChatClient:
         self._config = config
         self._model = config.resolved_model()
         self._url = _chat_url(config.base_url or "https://api.openai.com/v1")
+        self._effort = resolve_effort(config.effort, self._model)
         self._headers = {"Authorization": f"Bearer {config.api_key}" if config.api_key else "", **config.extra_headers}
 
     @property
@@ -43,6 +50,8 @@ class OpenAICompatibleChatClient:
         }
         if self._config.temperature is not None:
             payload["temperature"] = self._config.temperature
+        if self._effort:
+            payload["reasoning_effort"] = self._effort
 
         parts: list[str] = []
         usage: dict = {}

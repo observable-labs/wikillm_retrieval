@@ -190,3 +190,71 @@ def test_error_bodies_are_reported_not_raised(body, expected):
         io.BytesIO(body.encode()),
     )
     assert expected in _error_detail(exc)
+
+
+def _completions(handler) -> dict:
+    """The body of the one chat request the server received."""
+    return next(body for path, body, _ in handler.received if path.endswith("/chat/completions"))
+
+
+def _script_ok(handler) -> None:
+    handler.script["/v1/chat/completions"] = (
+        200,
+        [json.dumps({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})],
+    )
+
+
+def test_reasoning_effort_reaches_the_wire_clamped(server):
+    """The regression: `effort` was read only by the Anthropic client, so a
+    configured level was silently dropped on every OpenAI-compatible call."""
+    httpd, handler = server
+    _script_ok(handler)
+    client = OpenAICompatibleChatClient(
+        LLMConfig(provider="openai", model="gemini-3.7-flash", base_url=_base_url(httpd), effort="max")
+    )
+    client.complete([Message("user", "u")], max_tokens=64)
+
+    # "max" is not in Gemini 3's vocabulary; "high" is the strongest it takes.
+    assert _completions(handler)["reasoning_effort"] == "high"
+
+
+def test_no_configured_effort_leaves_the_field_off_the_request(server):
+    httpd, handler = server
+    _script_ok(handler)
+    client = OpenAICompatibleChatClient(
+        LLMConfig(provider="openai", model="gemini-3.7-flash", base_url=_base_url(httpd))
+    )
+    client.complete([Message("user", "u")], max_tokens=64)
+
+    assert "reasoning_effort" not in _completions(handler)
+
+
+def test_the_ingest_profile_sends_the_floor_its_model_allows(server):
+    httpd, handler = server
+    _script_ok(handler)
+    config = LLMConfig(provider="openai", model="gemini-3.7-flash", base_url=_base_url(httpd))
+    OpenAICompatibleChatClient(config.for_ingest()).complete([Message("user", "u")], max_tokens=64)
+
+    # "off" is what ingest asks for; "low" is as close as Gemini 3 gets.
+    assert _completions(handler)["reasoning_effort"] == "low"
+
+
+def test_anthropic_ignores_the_ingest_off_default():
+    """`output_config.effort` has no "off"; omitting it is the old behaviour."""
+    pytest.importorskip("anthropic")
+    from llmwiki.llm.anthropic_client import AnthropicChatClient
+
+    sent: list[dict] = []
+
+    class _Stream:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+        def get_final_message(self):
+            raise AssertionError("payload capture only")
+
+    client = AnthropicChatClient(LLMConfig(provider="anthropic", model="m", api_key="k", effort="off"))
+    client._client.messages.stream = lambda **payload: sent.append(payload) or _Stream()
+    with pytest.raises(AssertionError, match="payload capture"):
+        client.complete([Message("user", "u")], max_tokens=64)
+
+    assert "output_config" not in sent[0]

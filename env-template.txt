@@ -31,6 +31,13 @@ LLMWIKI_API_KEY="$GEMINI_API_KEY"
 LLMWIKI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
 LLMWIKI_MODEL=gemini-3.7-flash
 
+# Optional. How hard the model may think when answering: off/low/medium/high/max.
+# Gemini 3 has no "off", so anything below `low` clamps up to it. Unset means the
+# provider's default, which on Gemini 3 is most of the latency of a query — `low`
+# takes roughly a quarter off. `add` already runs at the floor; see the
+# "Reasoning effort" section of the README for why it has to.
+# LLMWIKI_EFFORT=low
+
 # Optional vector lane — turns on retrieval phase 1.5 (vector search over chunk
 # embeddings) and the RRF fusion in phase 2. Comment out LLMWIKI_EMBEDDING_MODEL
 # to fall back to keyword + graph retrieval only.

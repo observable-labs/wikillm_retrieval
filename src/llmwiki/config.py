@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .dotenv import load_dotenv
 from .errors import ConfigError
+from .reasoning import thinks_by_default
 
 ANTHROPIC = "anthropic"
 OPENAI = "openai"
@@ -51,9 +52,18 @@ class LLMConfig:
     base_url: str | None = None
     # Character budget for prompt assembly (see budget.py for the unit quirk).
     max_context_size: int = DEFAULT_MAX_CONTEXT_CHARS
-    # Anthropic-only knobs. `effort` maps to output_config.effort; `thinking`
-    # toggles adaptive thinking. Both are ignored by the OpenAI adapter.
+    # How hard the model may think. On Anthropic this maps to
+    # output_config.effort; on the OpenAI-compatible lane to
+    # `reasoning_effort`, clamped per model family (see reasoning.py).
     effort: str | None = None
+    # The same, for ingest's structured calls. Left unset it resolves to
+    # "off" on families that reason by default — thinking buys little on
+    # extraction, and on Gemini it shares the output ceiling with the pages
+    # themselves, so an over-thinking model returns empty content and the
+    # ingest loses them. Set it to a level to override, on an endpoint that
+    # rejects a wound-down one.
+    ingest_effort: str | None = None
+    # Anthropic-only: toggles adaptive thinking. Ignored by the OpenAI adapter.
     thinking: bool = True
     temperature: float | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
@@ -68,6 +78,20 @@ class LLMConfig:
             "no model configured. Set LLMWIKI_MODEL or pass --model "
             "(OpenAI-compatible endpoints have no safe default)."
         )
+
+    def for_ingest(self) -> "LLMConfig":
+        """This config with reasoning wound down for structured extraction.
+
+        Ported from llm_wiki's `resolveIngestReasoning`, which hardcodes "off"
+        at every ingest call site. The default is only applied to models known
+        to reason unencouraged; anywhere else the field stays absent, because
+        a model that doesn't reason may reject the parameter outright.
+        """
+        if self.ingest_effort is not None:
+            return replace(self, effort=self.ingest_effort)
+        if thinks_by_default(self.model):
+            return replace(self, effort="off")
+        return self
 
 
 @dataclass
@@ -210,6 +234,7 @@ def load(
             or DEFAULT_MAX_CONTEXT_CHARS
         ),
         effort=_env("LLMWIKI_EFFORT") or llm_file.get("effort"),
+        ingest_effort=_env("LLMWIKI_INGEST_EFFORT") or llm_file.get("ingest_effort"),
         thinking=_bool(llm_file.get("thinking"), default=True, env="LLMWIKI_THINKING"),
         temperature=_float(llm_file.get("temperature"), env="LLMWIKI_TEMPERATURE"),
         extra_headers=llm_file.get("extra_headers", {}) or {},
@@ -246,7 +271,10 @@ def load(
     for key, value in (overrides or {}).items():
         if value is None:
             continue
-        if key in {"provider", "model", "api_key", "base_url", "max_context_size", "effort", "temperature"}:
+        if key in {
+            "provider", "model", "api_key", "base_url", "max_context_size",
+            "effort", "ingest_effort", "temperature",
+        }:
             settings.llm = replace(settings.llm, **{key: value})
         elif key == "embedding_model":
             settings.embedding = replace(settings.embedding, model=value, enabled=bool(value))

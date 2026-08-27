@@ -163,9 +163,35 @@ Precedence: defaults → `~/.config/llmwiki/config.json` →
 | `LLMWIKI_API_KEY` | falls back to `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` |
 | `LLMWIKI_BASE_URL` | for OpenAI-compatible endpoints |
 | `LLMWIKI_MAX_CONTEXT` | context budget in **characters** (default 204,800) |
-| `LLMWIKI_EFFORT` | Anthropic `output_config.effort` |
+| `LLMWIKI_EFFORT` | how hard the model may think when answering — see below |
+| `LLMWIKI_INGEST_EFFORT` | the same for `add`; defaults to the least a thinking model allows |
 | `LLMWIKI_EMBEDDING_MODEL` | enables the vector lane |
 | `LLMWIKI_EMBEDDING_BASE_URL` | OpenAI-compatible `/v1/embeddings` |
+
+### Reasoning effort
+
+`off`, `low`, `medium`, `high`, `max`, clamped to what the model actually
+accepts. Gemini 3 and OpenAI's reasoning models have no "off" — the request
+is real but the API won't honour it — so `off` becomes the lowest level they
+do take rather than being dropped. On Anthropic the level maps to
+`output_config.effort`; on OpenAI-compatible endpoints to `reasoning_effort`.
+
+Left unset, answering runs at the provider's default. Ingest doesn't: its two
+calls are structured extraction, where thinking buys little and costs a lot.
+On a thinking model the `max_tokens` ceiling covers reasoning *and* content
+together, so a model that thinks too long returns an empty response and the
+pages it was writing are lost. `add` therefore asks for the least thinking
+the model permits, which `LLMWIKI_INGEST_EFFORT` overrides for an endpoint
+that refuses a wound-down level.
+
+The default only applies to model families known to reason unprompted, since
+elsewhere `reasoning_effort` may be rejected outright. `llmwiki status` prints
+what each lane resolved to:
+
+```
+provider  openai · gemini-3.7-flash
+thinking  ask provider default · ingest low
+```
 
 ### `.env` files
 

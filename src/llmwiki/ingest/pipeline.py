@@ -127,7 +127,9 @@ def ingest_document(
     index = project.index()
     overview = project.overview()
     language = settings.output_language
-    client = build_client(settings.llm)
+    # Ingest's two calls are structured extraction, not reasoning: see
+    # `LLMConfig.for_ingest` for why they wind thinking down.
+    client = build_client(settings.llm.for_ingest())
     date = today()
 
     # ── step 1: analysis ──────────────────────────────────────────────

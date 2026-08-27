@@ -67,7 +67,10 @@ class AnthropicChatClient:
             payload["system"] = system
         if self._config.thinking:
             payload["thinking"] = {"type": "adaptive"}
-        if self._config.effort:
+        # "off" is the ingest default on thinking families and has no
+        # output_config analogue; omitting the field is what Anthropic has
+        # always done here, so it stays the no-op it was.
+        if self._config.effort and self._config.effort != "off":
             payload["output_config"] = {"effort": self._config.effort}
 
         try:

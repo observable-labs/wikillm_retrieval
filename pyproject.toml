@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llmwiki"
+version = "0.1.0"
+description = "Build and query a self-maintaining LLM wiki from your documents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["llm", "wiki", "rag", "knowledge-base", "retrieval"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Text Processing :: Indexing",
+]
+
+# The core package is dependency-free: everything below the LLM boundary is
+# stdlib. Providers and document parsers are opt-in extras so a keyword-only
+# install stays small.
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=1.0"]
+docs = ["pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1", "python-pptx>=0.6.23"]
+all = ["anthropic>=1.0", "pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1", "python-pptx>=0.6.23"]
+
+[project.scripts]
+llmwiki = "llmwiki.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llmwiki"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

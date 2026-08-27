@@ -1,0 +1,202 @@
+"""Phase 3 and 4 of the query pipeline: budget control, then the answer.
+
+Retrieval (`retrieval.pipeline.search`) hands back ranked pages. This module
+packs as many of them as the budget allows into a numbered context block and
+asks the model to answer citing `[1]`, `[2]`, so every claim in the answer
+traces to a page the user can open.
+
+Budget allocation is proportional, from `budget.py`: 50% of the context
+window for retrieved pages, 5% for the index, 15% held back so the model has
+room to write. Pages are added in rank order and truncated individually at
+`max_page_size`, so one enormous page can't consume the whole window.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from .budget import compute_context_budget, trim_long_text
+from .config import Settings
+from .llm import Message, build_client
+from .retrieval import SearchResponse, search
+from .retrieval.keyword import SearchResult
+
+SYSTEM_HEADER = (
+    "You are the maintainer and reader of a personal wiki built from the user's own documents.\n"
+    "Answer from the retrieved pages below. They are the user's compiled knowledge; treat them as\n"
+    "the primary evidence."
+)
+
+CITATION_RULES = """
+Rules:
+- Cite the pages you use by their number: [1], [2]. Cite the specific page a claim came from.
+- If the pages disagree, say so and attribute each position to its page rather than picking silently.
+- If the pages do not contain the answer, say what is missing and what document would settle it.
+  Do not fill the gap from general knowledge without labelling it as outside the wiki.
+- Prefer wiki pages over raw source excerpts when both cover a point; the wiki page is the
+  maintained version. Use a raw source when it carries detail the page dropped.
+- Be concrete. Quote exact figures, names, and definitions from the pages instead of paraphrasing
+  them into vagueness.
+"""
+
+
+@dataclass
+class Citation:
+    number: int
+    path: str
+    title: str
+    kind: str
+    score: float
+    graph_related_to: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Answer:
+    question: str
+    text: str
+    citations: list[Citation] = field(default_factory=list)
+    retrieval: SearchResponse | None = None
+    pages_used: int = 0
+    pages_found: int = 0
+    context_chars: int = 0
+    notes: list[str] = field(default_factory=list)
+
+
+def ask(
+    project,
+    question: str,
+    settings: Settings,
+    top_k: int = 20,
+    include_sources: bool | None = None,
+    history: list[tuple[str, str]] | None = None,
+    on_token=None,
+) -> Answer:
+    """Retrieve over the whole project, then answer with citations."""
+    include = settings.search_sources if include_sources is None else include_sources
+    response = search(
+        project,
+        question,
+        top_k=top_k,
+        include_sources=include,
+        embedding_config=settings.embedding,
+    )
+
+    budget = compute_context_budget(settings.llm.max_context_size)
+    packed, citations = _pack_context(response.results, budget.page_budget, budget.max_page_size)
+
+    if not packed:
+        return Answer(
+            question=question,
+            text=(
+                "Nothing in this project matches that question yet. "
+                "Add a document with `llmwiki add <file>` and ask again."
+            ),
+            retrieval=response,
+            pages_found=len(response.results),
+            notes=response.notes,
+        )
+
+    index = trim_long_text(project.index(), budget.index_budget)
+    purpose = project.purpose()
+    system = "\n\n".join(
+        part
+        for part in (
+            SYSTEM_HEADER,
+            CITATION_RULES.strip(),
+            f"## Wiki Purpose\n{purpose}" if purpose.strip() else "",
+            f"## Wiki Index\n{index}" if index.strip() else "",
+        )
+        if part
+    )
+
+    conversation: list[Message] = [Message("system", system)]
+    for role, content in history or []:
+        conversation.append(Message(role, content))
+    conversation.append(
+        Message(
+            "user",
+            "\n".join(
+                [
+                    "## Retrieved pages",
+                    "",
+                    packed,
+                    "",
+                    "---",
+                    "",
+                    f"Question: {question}",
+                    "",
+                    "Answer using the pages above, citing them by number.",
+                ]
+            ),
+        )
+    )
+
+    client = build_client(settings.llm)
+    completion = client.complete(
+        conversation,
+        max_tokens=max(1024, budget.response_reserve // 3),
+        on_token=on_token,
+    )
+
+    return Answer(
+        question=question,
+        text=completion.text.strip(),
+        citations=citations,
+        retrieval=response,
+        pages_used=len(citations),
+        pages_found=len(response.results),
+        context_chars=len(packed),
+        notes=response.notes,
+    )
+
+
+def _pack_context(
+    results: list[SearchResult],
+    page_budget: int,
+    max_page_size: int,
+) -> tuple[str, list[Citation]]:
+    """Fill the page budget in rank order; skip anything that no longer fits.
+
+    A page too large for the remaining budget is skipped rather than
+    truncated to nothing, and the loop continues — a later, smaller page may
+    still fit, and dropping it would waste budget the ranking earned.
+    """
+    blocks: list[str] = []
+    citations: list[Citation] = []
+    used = 0
+
+    for result in results:
+        document = result.document
+        content = document.content if document else result.snippet
+        body = trim_long_text(content.strip(), max_page_size)
+        header_kind = "source" if result.kind == "source" else "wiki page"
+        related = (
+            f"\nRelated via: {', '.join(result.graph_related_to)}" if result.graph_related_to else ""
+        )
+        number = len(citations) + 1
+        block = (
+            f"### [{number}] {result.title}\n"
+            f"({header_kind}: {result.path}){related}\n\n"
+            f"{body}\n"
+        )
+        if used + len(block) > page_budget:
+            if used == 0:
+                # Nothing packed yet and the first page overflows: hard-trim
+                # it so the query still has evidence to work with.
+                block = block[:page_budget]
+            else:
+                continue
+        blocks.append(block)
+        citations.append(
+            Citation(
+                number=number,
+                path=result.path,
+                title=result.title,
+                kind=result.kind,
+                score=result.score,
+                graph_related_to=list(result.graph_related_to),
+            )
+        )
+        used += len(block)
+
+    return "\n".join(blocks), citations

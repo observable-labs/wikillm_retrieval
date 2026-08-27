@@ -50,10 +50,12 @@ Shape:
 - Don't write a Sources or References section. The tool prints one from the numbers you cite.
 """
 
-# `[1]`, and the `[1][2]` / `[1], [3]` runs models write when one claim rests on
-# several pages. A markdown link's `[1](path)` matches too, which is correct —
-# the page was still cited.
-CITATION_MARKER = re.compile(r"\[(\d+)\]")
+# `[1]`, the `[1][2]` / `[1], [3]` runs models write when one claim rests on
+# several pages, and `[1, 3]` — one bracket, several numbers, which is what a
+# model reaches for when it isn't thinking hard about format. Missing that last
+# form undercounts: an answer resting on four pages reported one. A markdown
+# link's `[1](path)` matches too, which is correct — the page was still cited.
+CITATION_MARKER = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 @dataclass
@@ -181,7 +183,11 @@ def _mark_cited(text: str, citations: list[Citation]) -> int:
     routinely yields a four-page answer, and presenting all twenty as sources
     overstates what the answer rests on and buries the four that carry it.
     """
-    referenced = {int(number) for number in CITATION_MARKER.findall(text)}
+    referenced = {
+        int(number)
+        for group in CITATION_MARKER.findall(text)
+        for number in group.split(",")
+    }
     for citation in citations:
         citation.cited = citation.number in referenced
     return sum(1 for citation in citations if citation.cited)

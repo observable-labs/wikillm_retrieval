@@ -129,3 +129,19 @@ def test_the_model_is_told_the_output_is_read_in_a_terminal(wiki, settings, stub
     system = client.prompt("answer")
     assert "No LaTeX" in system
     assert "Sources or References section" in system
+
+
+def test_several_numbers_in_one_bracket_all_count(wiki, settings, stub_llm):
+    """`[1, 3]` is a citation of two pages, not a miss.
+
+    A model told to think less reaches for this form, and reading only
+    `[n]` reported one source for an answer that rested on four.
+    """
+    for name in ("alpha", "beta", "gamma"):
+        _page(wiki, f"wiki/concepts/{name}.md", name.title(), f"Storage notes about {name}.")
+
+    stub_llm({"answer": "Covered in [1, 3], and again in [2,3]."})
+    answer = ask(wiki, "storage", settings)
+
+    assert answer.pages_cited == 3
+    assert [c.number for c in answer.citations if c.cited] == [1, 2, 3]

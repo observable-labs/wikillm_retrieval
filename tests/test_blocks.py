@@ -84,3 +84,18 @@ def test_preamble_prose_is_ignored():
     result = parse_blocks(text)
     assert [block.path for block in result.files] == ["wiki/a.md"]
     assert result.files[0].content == "body"
+
+
+def test_opener_without_trailing_marker_is_accepted():
+    """H7: models reached through the OpenAI-compatible lane (Gemini) routinely
+    omit the trailing `---` the prompt asks for. Before this was tolerated, a
+    complete, well-formed generation parsed to zero files AND zero warnings."""
+    text = (
+        "---FILE: wiki/a.md\nalpha\n---END FILE---\n"
+        "---FILE: wiki/b.md---\nbeta\n---END FILE---\n"
+        "---FILE: wiki/c.md   \ngamma\n---END FILE---\n"
+    )
+    result = parse_blocks(text)
+    assert [block.path for block in result.files] == ["wiki/a.md", "wiki/b.md", "wiki/c.md"]
+    assert [block.content for block in result.files] == ["alpha", "beta", "gamma"]
+    assert result.warnings == []

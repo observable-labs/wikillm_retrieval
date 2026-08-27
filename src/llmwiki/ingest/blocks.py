@@ -15,6 +15,13 @@ parser is a line state machine that handles all of them:
       page and spilled the rest into no-man's-land. Fence state is tracked,
       so a closer inside a fence is body text.
   H6  Empty path — matched, then silently dropped downstream.
+  H7  Opener without the trailing `---` — `---FILE: wiki/a.md` instead of
+      `---FILE: wiki/a.md---`. The prompt asks for the closed form and
+      Anthropic models comply, but others (Gemini via the OpenAI-compatible
+      lane) routinely omit it. Nothing then opens a block, so the response
+      parses to zero files *and zero warnings* — an entire well-formed
+      generation discarded silently. The trailing marker is now optional,
+      matching the latitude the closer has always had under H3.
 
 Unsafe paths are rejected here, at the parse boundary, because this is the
 only chokepoint every generated path passes through.
@@ -27,9 +34,9 @@ from dataclasses import dataclass, field
 
 from ..paths import is_safe_ingest_path
 
-OPENER_LINE = re.compile(r"^---\s*FILE:\s*(.+?)\s*---\s*$", re.IGNORECASE)
+OPENER_LINE = re.compile(r"^---\s*FILE:\s*(.+?)\s*(?:---)?\s*$", re.IGNORECASE)
 CLOSER_LINE = re.compile(r"^---\s*END\s+FILE\s*---\s*$", re.IGNORECASE)
-REVIEW_OPENER = re.compile(r"^---\s*REVIEW:\s*(.+?)\s*---\s*$", re.IGNORECASE)
+REVIEW_OPENER = re.compile(r"^---\s*REVIEW:\s*(.+?)\s*(?:---)?\s*$", re.IGNORECASE)
 REVIEW_CLOSER = re.compile(r"^---\s*END\s+REVIEW\s*---\s*$", re.IGNORECASE)
 # CommonMark: 3+ backticks or tildes, indented at most 3 spaces.
 FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")

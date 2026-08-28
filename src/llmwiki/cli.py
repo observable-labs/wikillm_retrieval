@@ -286,6 +286,7 @@ def cmd_search(args, printer: Printer) -> int:
             json.dumps(
                 {
                     "mode": response.mode,
+                    "lanes": response.lanes.as_dict(),
                     "token_hits": response.token_hits,
                     "vector_hits": response.vector_hits,
                     "graph_hits": response.graph_hits,
@@ -312,9 +313,14 @@ def cmd_search(args, printer: Printer) -> int:
     if not response.results:
         printer.info("no matches")
         return 0
+    # Lanes that ran, then what each contributed. The two are different facts:
+    # a lane can run and contribute nothing, and reading the second as the first
+    # is how a keyword-only query came to be labelled hybrid.
+    ran = ", ".join(name for name, used in response.lanes.as_dict().items() if used)
     print(
-        f"{response.mode} · {response.token_hits} keyword · "
-        f"{response.vector_hits} vector · {response.graph_hits} graph\n"
+        f"{response.mode} · lanes: {ran or 'none'} · "
+        f"{response.token_hits} lexical · {response.vector_hits} vector · "
+        f"{response.graph_hits} added by graph\n"
     )
     for result in response.results:
         marker = "src" if result.kind == "source" else "   "
@@ -336,8 +342,13 @@ def cmd_embed(args, printer: Printer) -> int:
     settings = config.load(project.root, _overrides(args))
     settings.embedding.require_enabled()
 
-    documents = load_documents(project, include_sources=False)
-    printer.info(f"embedding {len(documents)} wiki page(s) with {settings.embedding.model}")
+    include_sources = settings.search_sources if args.sources is None else args.sources
+    documents = load_documents(project, include_sources=include_sources)
+    pages = sum(1 for d in documents if d.kind == "wiki")
+    printer.info(
+        f"embedding {pages} wiki page(s) and {len(documents) - pages} source(s) "
+        f"with {settings.embedding.model}"
+    )
 
     def on_progress(done: int, total: int, path: str, state: str) -> None:
         if state != "cached":
@@ -534,6 +545,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     embed = subparsers.add_parser("embed", help="build or refresh the vector index")
     embed.add_argument("--force", action="store_true", help="re-embed unchanged pages")
+    # The vector lane must cover the same corpus retrieval searches, or fusing
+    # it demotes everything it cannot rank. See `index_documents`.
+    embed.add_argument("--no-sources", dest="sources", action="store_false", default=None,
+                       help="embed wiki pages only (leaves raw sources unrankable by vector)")
     _add_common(embed)
     embed.set_defaults(func=cmd_embed)
 

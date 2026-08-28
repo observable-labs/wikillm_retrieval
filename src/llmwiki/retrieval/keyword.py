@@ -1,7 +1,17 @@
-"""Phase 1: tokenized keyword scoring over wiki pages and raw sources.
+"""Documents, results, and the substring scorer that BM25 replaced.
 
-Weights are ported verbatim from llm_wiki's `search.rs` so ranking behaves
-the same. The absolute numbers only matter relative to each other:
+`load_documents`, `Document` and `SearchResult` are the corpus-facing half and
+are used by everything. `score_document` is the other half: the scorer ported
+verbatim from llm_wiki's `search.rs`, which ranked by term *presence*.
+
+It is no longer the lexical lane — `lexical.py` is, and ranks by BM25. This
+survives as the lane for CJK queries, where FTS5's `unicode61` tokenizer cannot
+segment an unbroken run of characters and `tokenize_query`'s bigram expansion
+plus substring matching is genuinely the better retriever. `SOURCE_SCORE_FACTOR`
+still applies here, because this scorer has no length normalization and without
+it a short raw source outranks the page compiled from it.
+
+The absolute numbers only matter relative to each other:
 
     filename exactly matches the query      +200
     query phrase appears in the title        +50
@@ -10,7 +20,7 @@ the same. The absolute numbers only matter relative to each other:
     a token appears in the body           +1 each
 
 A page scoring zero on every signal is not a result at all — it never enters
-the ranking, so graph expansion has a clean set of seeds to work from.
+the ranking, so diffusion has a clean set of seeds to work from.
 """
 
 from __future__ import annotations

@@ -282,7 +282,18 @@ def index_documents(
     force: bool = False,
     on_progress=None,
 ) -> dict:
-    """Embed every wiki page whose content hash changed. Returns a summary."""
+    """Embed every document whose content hash changed. Returns a summary.
+
+    Everything it is given, not only `kind == "wiki"`. Filtering sources out
+    here made the vector lane cover a strict subset of the corpus, and fusing a
+    partial-coverage ranking with a full-coverage one is not a neutral act: RRF
+    adds a second reciprocal for every document the covered lane ranked, so
+    every uncovered document is pushed down by exactly the amount the covered
+    ones are pushed up. Measured on the atlas suite, turning the vector lane on
+    dropped recall@5 from 1.00 to 0.79 — the raw sources, which no vector could
+    rank, fell out of the window. Whether to embed sources is the caller's
+    decision and is expressed by what it passes in.
+    """
     import hashlib
 
     config.require_enabled()
@@ -293,7 +304,7 @@ def index_documents(
 
     try:
         page_ids: set[str] = set()
-        pages = [document for document in documents if document.kind == "wiki"]
+        pages = list(documents)
         for position, document in enumerate(pages, start=1):
             page_id = document.path
             page_ids.add(page_id)

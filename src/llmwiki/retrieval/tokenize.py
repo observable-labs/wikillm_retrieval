@@ -1,11 +1,18 @@
 """Query tokenization, ported from llm_wiki's `search.rs::tokenize_query`.
 
-Two behaviours matter and are easy to lose:
+Three behaviours matter and are easy to lose:
 
 * CJK text has no spaces, so a Chinese query is additionally expanded into
   character bigrams plus single characters — otherwise a 4-character query
   matches nothing unless the page repeats it verbatim.
 * Stop words are removed from *queries only*, never from documents.
+* **Single-character tokens are dropped, except digits.** The original rule
+  dropped every one-character token as noise, which silently discarded the digit
+  in `Aurora-1` — separators split it into `aurora` and `1` — and made every
+  numbered member of a series identical to the retriever. On a corpus of
+  `Aurora-1`, `Aurora-2`, `Borealis-2`, `Borealis-3` that is not an edge case,
+  it is most of the corpus, and it was worth 0.12 MRR on the questions that
+  name one.
 """
 
 from __future__ import annotations
@@ -29,12 +36,22 @@ _SEPARATORS = re.compile(
 _CJK_RANGE = re.compile(r"[㐀-鿿]")
 
 
+def contains_cjk(text: str) -> bool:
+    """Whether a string holds CJK characters, which segment differently.
+
+    Read by the lexical lane: FTS5's `unicode61` tokenizer treats an unbroken
+    CJK run as a single token, so those queries need the substring scorer and
+    the bigram expansion below rather than a BM25 index.
+    """
+    return bool(_CJK_RANGE.search(text))
+
+
 def tokenize_query(query: str) -> list[str]:
     """Lowercase tokens, CJK-expanded, stop-words removed, deduplicated."""
     raw = [
         token
         for token in _SEPARATORS.split(query.lower())
-        if len(token) > 1 and token not in STOP_WORDS
+        if (len(token) > 1 or token.isdigit()) and token not in STOP_WORDS
     ]
 
     tokens: list[str] = []

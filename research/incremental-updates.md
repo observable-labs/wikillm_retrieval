@@ -22,10 +22,21 @@ No global recompute anywhere.
 This is LightRAG's headline advantage over GraphRAG, implemented more cleanly:
 llmwiki has no global structure that *could* require recomputation.
 
+> **Measured 2026-08-28**, by the growth protocol in
+> [evaluation/roadmaps/discriminating-power.md](evaluation/roadmaps/discriminating-power.md)
+> §6.3. Fourteen documents inserted three at a time: seconds per document as the
+> wiki grows from 3 pages to 14 are 70, 82, 88, 70, 52 — no trend, and the
+> variance belongs to the provider. The claim above was read off the code; this
+> is the first time it was checked.
+
 ### But there is no retrieval index to update
 
 The constraint is currently satisfied **vacuously** — nothing persists between
-queries, so nothing can go stale. The price is a full rebuild on every query:
+queries, so nothing can go stale. That is also why EraRAG's third curve —
+agreement between an incrementally-built index and a from-scratch rebuild — has
+no subject here, and `null-check` passing is the proof. The one exception is
+`vectors.db`, which *is* persistent and maintained page by page, so it is the
+only artifact that can drift and the only one worth running that curve against. The price is a full rebuild on every query:
 
 | Rebuilt per query | Where |
 |---|---|

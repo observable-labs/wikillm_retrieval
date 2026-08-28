@@ -25,9 +25,16 @@ Recorded because they change the design, not just the wording.
 | 8 | No way to evaluate a system **not written in Python** | subprocess adapter, JSON over stdio (§3.5) |
 | 9 | Drift-probe questions scored on pages, but their whole point is that **the right page changes** | drift probes score on strings (§5.3) |
 | 10 | YAML question file, `Profile` class that does not exist yet | JSONL; `Lanes` (§4, §3.4) |
+| 11 | Nothing validated **the run against its own configuration** — a lane that silently skipped itself was scored under the name of the lane requested | `Delivery` and `Unavailable` ([roadmaps/harness-self-validation.md](roadmaps/harness-self-validation.md), E1–E2) |
+| 12 | Nothing validated that **the operating point could have separated the systems being compared** — a comparison at a k where the leader scores 1.00 ranks systems on a constant | headroom refusal and the k sweep ([roadmaps/discriminating-power.md](roadmaps/discriminating-power.md), E8–E9) |
 
 Items 1–3 are the substantive ones. A harness that cannot hold two systems side
 by side cannot answer the question the rest of this research exists to ask.
+
+Gaps 11 and 12 were found by running the harness rather than by reviewing it,
+and they are a sequence: 1–10 ask what should be measured, 11 asks whether the
+measurement ran, 12 asks whether it could have come out differently. Each was
+invisible until the one before it closed.
 
 ---
 
@@ -156,6 +163,18 @@ sources, and a hit on that page is evidence for all three.
 Getting this wrong is the classic way cross-system RAG comparisons produce
 nonsense, so v1 makes it a declared property of the suite rather than an
 assumption in the runner.
+
+> **What "map" turned out to mean, 2026-08-28.** The frontmatter value is not
+> itself a corpus id and returning it unchanged is not a mapping. The conventions
+> in the wild disagree — a generated fixture writes
+> `raw/sources/aurora-1-flight-report.md`, llmwiki's own ingest writes
+> `aurora-1-flight-report.md` — and llmwiki also writes a summary *page* per
+> ingested document at `wiki/sources/<name>.md`, so the basename is ambiguous
+> between the document and the page about it. Resolving against the corpus, raw
+> sources first, took `recall@5` on the growth fixture from 0.14 to 0.93. This
+> paragraph exists because the rule above was unit-tested, read several times,
+> and wrong until a suite actually declared `canonical`. See
+> [roadmaps/discriminating-power.md](roadmaps/discriminating-power.md) §11.6.
 
 ### 3.4 The adapters that ship with v1
 

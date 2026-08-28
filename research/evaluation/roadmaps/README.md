@@ -10,7 +10,28 @@ implementation.
 
 | Document | Question it answers | Status |
 |---|---|---|
-| [harness-self-validation.md](harness-self-validation.md) | The harness measures the right things. Why did its first adversarial run report numbers that did not mean what their labels said? | implemented; §4b and §10 record what each step became |
+| [harness-self-validation.md](harness-self-validation.md) | The harness measures the right things. Why did its first adversarial run report numbers that did not mean what their labels said? | implemented; §4.1 and §10 record what each step became |
+| [discriminating-power.md](discriminating-power.md) | The labels are now honest. Why does the resulting headline table still not support the conclusion drawn from it? | implemented; §4.2 records what each step became, §6.1 the acceptance results, §11 where the proposal was wrong |
+
+They are one progression, and the numbering is continuous because the defects
+are:
+
+| | Asks | Defects | Steps |
+|---|---|---|---|
+| [`../harness-v1.md`](../harness-v1.md) | what should be measured | gaps 1–10 | built |
+| harness-self-validation.md | did the measurement run | D1–D5 | E1–E7, built |
+| discriminating-power.md | could the measurement have separated anything | D6–D10 | E8–E14, built |
+
+Each one is only visible once the one above it is closed. The second could not
+be seen until runs stopped being mislabelled; the third could not be seen until
+the numbers meant what they said, at which point the remaining question was
+whether they meant anything.
+
+The third one's own findings say the same thing a level down. Sweeping `k`
+turned up four defects in retrieval larger than several of the five the previous
+round fixed, and every one of them was invisible at the single `k` the previous
+round reported. Whatever the fourth document is about, it is probably already
+sitting inside a number that currently looks fine.
 
 What the closed harness then measured — and the retrieval rebuild it made
 possible — is in

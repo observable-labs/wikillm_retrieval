@@ -433,7 +433,12 @@ Two things to get right:
 - **Sources damping.** `SOURCE_SCORE_FACTOR = 0.6` (`keyword.py:38`) must survive
   — apply it after ranking, or keep sources in a second query.
 
-Fuse with the dense lane by RRF exactly as now (`RRF_K = 60.0`).
+Fuse with the dense lane by RRF. **`RRF_K` is 3.0, not the published 60** —
+60 is 6% of TREC's 1,000-result lists and these lanes rank 20 to 50, where it
+sits above the whole list and lets a lane that is merely adequate outvote one
+that is good. See
+[`../evaluation/roadmaps/discriminating-power.md`](../evaluation/roadmaps/discriminating-power.md)
+§7.
 
 **Done when:** `recall@20` on the `single-hop` tag improves, and no tag
 regresses. If nothing moves, your corpus is small enough that presence-matching
@@ -538,6 +543,19 @@ one does, it is a stopword-like title and belongs in the pruned set).
 > recall@10 and seeded PPR scores 0.96. SPRIG's published direction is
 > 0.851 → 0.867; the direction reproduces, the magnitude does not transfer, and
 > the absolute numbers are not comparable because the corpora differ.
+>
+> **Amended 2026-08-28.** That validation was run at one `k`. Swept, the lane's
+> contribution changed sign — negative at k ≤ 2, positive at k ≥ 5 — and SPRIG
+> reports at R@5, where this implementation showed +0.01 with an interval
+> spanning zero. The cause was a fourth departure nobody had noticed:
+> `DEFAULT_SEEDS = 5` while returning fewer than five results means a diffusion
+> driven by documents that will not be shown decides the one that is. Seeds now
+> follow the requested window, and the lane is at or above no-graph at every `k`
+> on both corpora. See
+> [`../evaluation/roadmaps/discriminating-power.md`](../evaluation/roadmaps/discriminating-power.md)
+> §7 and
+> [`../../future_work/retrieval-rebuild/README.md`](../../future_work/retrieval-rebuild/README.md)
+> §9.3.
 >
 > Three departures from the parameters below were forced by measured failures:
 > seed mass is `1/rank` rather than the fused score (RRF scores differ by 2%

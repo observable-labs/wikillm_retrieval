@@ -18,17 +18,30 @@ Contents:
 - [benchmarking.md](benchmarking.md) — the survey of what already exists and how
   SOTA methods benchmark.
 - [roadmaps/](roadmaps/README.md) — corrective roadmaps written against a running
-  harness. Start with
+  harness, in the order the defects became visible.
   [harness-self-validation.md](roadmaps/harness-self-validation.md): the harness
-  is built, and its first adversarial run showed it will score a configuration
-  that never ran. Now implemented.
+  will score a configuration that never ran — implemented.
+  [discriminating-power.md](roadmaps/discriminating-power.md): with that closed,
+  the numbers mean what they say and are still reported at a `k` where nothing
+  could have separated the systems — implemented, and its §7 is where four
+  retrieval defects that only a `k` sweep could see are recorded.
 
-**Status, 2026-08-27.** Tier 0 and Tier 1 below are both built and run: a
+**Status, 2026-08-28.** Tier 0 and Tier 1 below are both built and run: a
 generated 78-document corpus with 44 questions, and 200 HotpotQA questions over
 1,991 pooled distractor paragraphs. What they measured is in
 [`../../future_work/retrieval-rebuild/`](../../future_work/retrieval-rebuild/README.md).
-Tier 2's growth protocol has hooks and has never been run; Tier 3 remains
-excluded by design.
+Tier 3 remains excluded by design. Those measurements were reported at a single
+`k`; [roadmaps/discriminating-power.md](roadmaps/discriminating-power.md) §1
+shows which of their conclusions survived sweeping it, §7 what sweeping it found
+in retrieval, and §6.1 where they landed — llmwiki now beats bm25 at every `k`
+on both corpora with the interval excluding zero, which the single-column
+version could not have shown in either direction.
+
+Tier 2's growth protocol is run: `fixtures/atlas/growth` is a source-addressed
+suite built for it, because the blocker was never the cost — it re-ingests, so
+every gold id in both retrieval suites stops resolving. Ingest cost per document
+does not grow with the corpus, which is the first measurement of the claim in
+[`../incremental-updates.md`](../incremental-updates.md) §1.
 
 ---
 
@@ -44,6 +57,14 @@ points of recall.
 
 > **The primary artifact is not a score. It is a quality-versus-latency curve
 > across profiles.**
+
+**Half of this exists now.** `compare --k 1,2,5,10,20` prints one column per `k`,
+a `separates` column naming the smallest `k` at which the difference from the
+baseline clears its confidence interval, and latency split into the part the
+system spends and the part it rents from a provider. The profile axis is still
+an aspiration and waits on [build-plan.md](../target-architecture/build-plan.md)
+step 9 — so the matrix below is the shape of the artifact, with `k` currently
+standing in for the profile rows.
 
 Concretely, every run produces a matrix, not a number:
 
@@ -63,6 +84,16 @@ Two columns must appear beside quality in every report, because they are
 constraints and not free variables: **retrieval latency p50/p95** and **index
 cost per document** (seconds and tokens). LinearRAG's headline table does exactly
 this, and it is why that table is legible.
+
+Retrieval latency is now three columns rather than one — local, remote, and the
+total — because a single number added 410 ms of somebody else's network to 14 ms
+of ranking and called the sum the pipeline's cost. And it is worth knowing the
+scale before reading any of them: measured on atlas, retrieval p50 is 21 ms and
+the generation call after it is 31 seconds. Every latency argument in
+[roadmaps/discriminating-power.md](roadmaps/discriminating-power.md) happens
+inside the first 1.5% of that bar. The retrieval numbers still matter — the
+`voice` profile has no generation call in it — but a curve drawn over retrieval
+alone covers less of what a reader will assume than it looks like it does.
 
 ---
 
@@ -177,6 +208,16 @@ so the two are confounded on any hand-written wiki fixture and separable here.
 insertion, and *agreement between the incrementally-built index and a
 from-scratch rebuild*. That last curve is the direct test of drift, and it is
 what tells you whether `rebuild` is a nicety or overdue.
+
+*Run, and the third curve turned out to have no subject.* Cost per document is
+flat as the corpus grows, which is the claim in
+[`../incremental-updates.md`](../incremental-updates.md) §1 measured rather than
+read off the code. Accuracy tracks coverage and dips once — one question of
+fourteen, when a newly inserted document displaces a gold source, which is
+exactly the interference the protocol exists to catch. The drift curve needs an
+index that persists between queries, and llmwiki has only one: `vectors.db`. So
+it is the lane to run this against next, and `rebuild` stays a question rather
+than becoming one.
 
 ---
 

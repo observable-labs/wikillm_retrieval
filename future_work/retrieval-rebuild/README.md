@@ -16,11 +16,20 @@ that, the pipeline had five defects, and one of them — graph expansion — was
 implementing the exact shape the literature measures as *worse than having no
 graph at all*.
 
+> **Read §9 first if you are here for the numbers.** Sections 1–7 are the
+> 2026-08-27 rebuild and are left as they were measured. On 2026-08-28 the
+> harness learned to sweep `k`, and four more defects in retrieval fell out of
+> that — larger than several of the five in §2, and all of them invisible at the
+> single `k` these sections report. §9 has them, and says which conclusions
+> above they overturn.
+
 Companion documents:
 [`../../research/target-architecture/build-plan.md`](../../research/target-architecture/build-plan.md)
-(what to build), and
+(what to build),
 [`../../research/evaluation/roadmaps/harness-self-validation.md`](../../research/evaluation/roadmaps/harness-self-validation.md)
-(the harness defects, D1–D5, and the roadmap E1–E7 that closed them).
+(the harness defects D1–D5 and the roadmap E1–E7 that closed them), and
+[`../../research/evaluation/roadmaps/discriminating-power.md`](../../research/evaluation/roadmaps/discriminating-power.md)
+(D6–D10, E8–E14, and the acceptance protocol §9 below is the retrieval half of).
 
 ---
 
@@ -366,7 +375,10 @@ a decimal point.
 |---|---|---|---|
 | `MENTION_SCALE` | 0.05 | atlas, 44 questions | flat 0.02–0.05; past 0.25 recall is traded for rank |
 | `MAX_MENTIONS_PER_DOCUMENT` | 4 | atlas, checked on HotpotQA | flat from 4 upward on both; falls off below — 0.900 against 0.965 at 1 on HotpotQA |
-| `VECTOR_DEPTH_MULTIPLIER` | 2 | atlas | capping the vector lane recovered 0.10 MRR against letting it rank as deep as the lexical lane |
+| `VECTOR_DEPTH_MULTIPLIER` | 2 | atlas | **superseded — see §9.** The 0.10 MRR was an artifact of the page-scoring defect; re-swept, depth moves no recall at any k on either corpus, and the cap now buys latency only |
+| `RRF_K` | 3 | atlas + HotpotQA jointly | **new — see §9.** 60 was 6% of TREC's 1,000-result lists; 6% of the 50 actually fused is 3. Monotone between 60 and 3 on both corpora, flat below 1 |
+| `DEFAULT_SEEDS` | 0 = the window | atlas + HotpotQA jointly | **new — see §9.** A fixed 5 made the graph lane's sign depend on `k`; tying it to the window is at or above no-graph at every k on both |
+| `group_by_page` tail term | removed | atlas + HotpotQA jointly | **new — see §9.** Chunk count outranked chunk quality; removing it is the largest single gain in this table |
 | `DEFAULT_SELF_WEIGHT` | 1.0 | atlas + HotpotQA jointly | recall peaks at 1.0, MRR at 2–3; recall is the primary metric so 1.0 wins by 0.02 recall@5 against 0.02 MRR |
 | `DEFAULT_TAIL_WEIGHT` | 0.0 | atlas + HotpotQA jointly | 0 is best on recall on both (0.965 vs 0.958 on HotpotQA); MRR flat across 0–1 |
 | `DEFAULT_ALPHA` | 0.15 | SPRIG, unchanged | |
@@ -391,6 +403,13 @@ unaffected by it.
 ---
 
 ## 6. What did not work
+
+> **Superseded in part, 2026-08-28.** This section's first finding was measured
+> while `group_by_page` was ranking atlas's raw sources above everything on every
+> query. With that fixed the dense lane on atlas scores 0.705 recall@1 rather
+> than 0.023, and `full` beats both of its lanes at every k. The templated-corpus
+> effect below is real and was not the whole of it — §9 has the correction, and
+> the moral the section draws is if anything stronger than it was.
 
 **The dense lane does not help on atlas — and that was the fixture, not the
 lane.** With the whole corpus embedded and fusion depth capped, `full` reaches
@@ -432,8 +451,16 @@ scaled — but they have never been tuned *as* diffusion weights and should be.
 - **Steps 9, 11, 12, 13, 14.** Profiles, rerank, topic pages, the agentic rung,
   `rebuild`. Untouched. The `thematic` tag is the weakest column in every table
   above (MRR ~0.5), which is exactly what step 12 exists to fix.
-- **The growth protocol has still never been run.** It is the only check of the
-  O(document) claim, and `ragharness growth` exists and works.
+- **The growth protocol — run, 2026-08-28.** The blocker was never the cost:
+  `growth()` re-ingests, so the wiki pages it produces are named by a language
+  model and every gold id in both shipped suites stops resolving.
+  `fixtures/atlas/growth` is a source-addressed suite (`id_space: canonical`)
+  built for it. Two of the three curves exist:
+  [`../../research/evaluation/roadmaps/discriminating-power.md`](../../research/evaluation/roadmaps/discriminating-power.md)
+  §6.3. Ingest cost per document does not grow with the corpus; recall tracks
+  coverage and dips once, by one question out of fourteen, when a newly inserted
+  document displaces a gold source. The third curve has no subject until the
+  protocol is run on a lane that embeds.
 - **2WikiMultiHopQA.** Build-plan step 8 names it alongside HotpotQA, and SPRIG's
   gap there is much larger (0.697 → 0.794). It was not run; the dataset was not
   reachable from the mirror used here.
@@ -449,10 +476,17 @@ python3 fixtures/build_atlas.py --force
 python3 fixtures/build_hotpot.py --questions 200 --force     # downloads
 
 PYTHONPATH=. python3 -m ragharness.cli null-check --suite fixtures/atlas/suite
+
+# §4, as it was measured: one k.
 PYTHONPATH=. python3 -m ragharness.cli compare --suite fixtures/atlas/suite --k 5 \
     --lanes sources,sources/no-graph,sources/no-entities,sources/no-links,sources/presence
+
+# §9, and the form every comparison should now take: the curve, not a column.
+PYTHONPATH=. python3 -m ragharness.cli compare --suite fixtures/atlas/suite \
+    --k 1,2,3,5,10 --lanes full,full/no-graph,sources --cache-queries
 PYTHONPATH=. python3 -m ragharness.cli compare --suite fixtures/hotpot/suite \
-    --lanes lexical,lexical/no-graph,lexical/no-links,lexical/presence
+    --k 1,2,5,10,20 --lanes lexical,lexical/no-graph,hybrid,hybrid/no-graph \
+    --cache-queries
 
 # tests
 cd space_brief/wikillm_retrieval && python3 -m pytest -q
@@ -468,3 +502,173 @@ requested raw sources was a degraded run on any corpus without them.
 The `hybrid` and `full` lanes and the `dense` baseline need an embedding model
 and a built index (`llmwiki embed --project <corpus>`), and every query is a
 network round trip. Everything else runs offline.
+
+---
+
+## 9. What the eval found next, 2026-08-28
+
+Everything above was measured at one `k`. Making the harness sweep it — the work
+in
+[`../../research/evaluation/roadmaps/discriminating-power.md`](../../research/evaluation/roadmaps/discriminating-power.md)
+— found four more defects in retrieval, and they are larger than several of the
+five in §2. They are recorded here rather than folded into the sections above
+because the sequence is the finding: every one of them was invisible at k=10 on
+a corpus where the baseline already scored 0.90.
+
+### 9.1 A page's vector rank depended on how deep the chunk scan went
+
+`group_by_page` scored a page as `top + min(0.3 × Σ(other chunk scores), 1 −
+top)`. Cosine similarities sit in a narrow band around 0.6–0.8, so the tail term
+saturated at three chunks: a page with three retrieved chunks near 0.6 scored
+1.00 while a page with one chunk at 0.85 scored 0.85. **Chunk count outranked
+chunk quality.** How many chunks are retrieved is a depth constant chosen for
+latency, so the vector lane's ranking depended on it — and the pipeline scans
+`max(3 × max(2k, 20), 30)` chunks where the `dense` baseline scans
+`max(30, 3k)`, which is why one scored below the other.
+
+Vector-lane `recall@k`, by the depth each caller scans:
+
+| | R@1 | R@2 | R@5 | R@10 |
+|---|---|---|---|---|
+| hotpot, pipeline depth | 0.378 | 0.720 | 0.968 | 0.990 |
+| hotpot, dense depth | 0.420 | 0.772 | 0.968 | 0.990 |
+| hotpot, **best chunk** | **0.475** | **0.863** | 0.973 | 0.990 |
+| atlas, pipeline depth | 0.023 | 0.068 | 0.284 | 0.830 |
+| atlas, dense depth | 0.114 | 0.227 | 0.750 | 0.886 |
+| atlas, **best chunk** | **0.705** | **0.807** | **0.886** | **0.909** |
+
+Atlas is the extreme because its fourteen multi-chunk pages are the raw source
+documents: they saturated at 1.00 and sat at the head of the vector ranking for
+every query, whatever the query was. **This is what §6's "the dense lane does not
+help on atlas" was actually measuring.** The templated-corpus explanation given
+there is real — twenty subsystem pages are near-identical in embedding space —
+and it was not the dominant term, and the section drew a conclusion from it.
+
+Scoring a page by its best chunk buys an invariant worth more than the recall:
+the lane's ranking no longer depends on the scan depth, so a constant chosen for
+latency stops deciding results. Weaker variants of the coverage bonus — a mean
+instead of a sum, a capped per-chunk count — were measured too and cost 0.08
+recall@1 on atlas. A bonus small enough to be safe is a bonus too small to do
+anything.
+
+### 9.2 `RRF_K = 60` is 6% of a list this pipeline never has
+
+RRF's published constant was tuned against TREC runs of 1,000 results. These
+lanes rank 20 to 50, where 60 sits above the whole list and flattens it: a
+document one lane ranks first scores `1/61 = 0.0164` while a document both lanes
+rank tenth scores `2/70 = 0.0286` and outranks it, so a lane that is merely
+adequate outvotes one that is good. Rescaled to the same fraction of the depth
+actually fused, 6% of 50 is 3.
+
+|  | R@1 | R@2 | R@5 | R@10 |
+|---|---|---|---|---|
+| hotpot, `rrf_k = 60` | 0.435 | 0.672 | 0.912 | 0.988 |
+| hotpot, `rrf_k = 3` | 0.453 | 0.730 | 0.953 | 0.990 |
+| atlas, `rrf_k = 60` | 0.705 | 0.864 | 0.920 | 0.955 |
+| atlas, `rrf_k = 3` | 0.727 | 0.864 | 0.932 | 0.955 |
+
+Monotone between 60 and 3 on both and flat below 1, so the value is not on a
+cliff.
+
+### 9.3 The graph lane's sign changed with `k`, and the seed count is why
+
+§4.2 reported the graph lane as worth +0.07 recall@10 on HotpotQA. Swept, its
+contribution was `−0.01, −0.03, +0.01, +0.07, +0.04` at k = 1, 2, 5, 10, 20. A
+mechanism whose sign changes with the size of the result window is re-ranking
+inside a window, not retrieving better — and the published result it was checked
+against, SPRIG's RRF 0.851 → seeded-PPR 0.867, is reported at R@5, where this
+implementation showed nothing.
+
+The cause was `DEFAULT_SEEDS = 5`, fixed. Returning one result while five
+documents radiate mass means a diffusion driven by four documents that will not
+be shown decides the one that is. `seed_count = 0` now means "as many as the
+caller asked for":
+
+| | R@1 | R@2 | R@5 | R@10 | R@20 |
+|---|---|---|---|---|---|
+| hotpot, no graph | 0.453 | 0.730 | 0.953 | 0.990 | 0.998 |
+| hotpot, seeds = 5 | 0.450 | 0.698 | 0.960 | 0.993 | 0.998 |
+| hotpot, **seeds = k** | 0.453 | 0.730 | 0.960 | **0.998** | **1.000** |
+| atlas, no graph | 0.727 | 0.864 | 0.886 | 0.909 | 0.920 |
+| atlas, seeds = 5 | 0.727 | **0.875** | 0.932 | 0.955 | 0.955 |
+| atlas, **seeds = k** | 0.727 | 0.864 | 0.932 | 0.955 | 0.955 |
+
+`seeds = k` is at or above no-graph at every k on both corpora, which `seeds = 5`
+is not. It costs one question of atlas R@2 against the fixed value and buys the
+property that makes the lane safe to leave on at any `k`.
+
+### 9.4 The vector lane's local cost grew with the corpus, not the work
+
+Two defects, both in `embeddings.py`, both found by trying to build a corpus
+large enough for the baseline to have room to lose on.
+
+`index_documents` batched chunks *within* a document. A wiki of short pages is
+one chunk per page, so `batch_size` never fired at all and embedding was one
+HTTP round trip per page: 9,769 paragraphs at about 1.4 s each is roughly four
+hours. Filling the batch from as many documents as it holds made the same work
+306 requests and about five minutes.
+
+`VectorStore.search` selected every chunk's `text` alongside its vector and
+re-parsed every vector on every query — 45 MB read to compute a dot product that
+never looks at the text. The scan now reads vectors only, holds the parsed
+matrix for as long as the store is unchanged, and fetches text for the surviving
+`top_k` in a second statement.
+
+Together they take the lane from a cost that grows with the corpus to one that
+grows with the work: on the 9,931-chunk store, 145 ms for the first query and
+**5.6 ms** for every one after, against **6.1 ms** on the five-times-smaller
+store. What remains is llmwiki's shipped configuration rather than a defect —
+`numpy` is an opportunistic accelerator and not a dependency, and without it the
+same scan is **269 ms every query**. It is now a declared extra,
+`pip install llmwiki[vector]`, so that which one was measured is a configuration
+rather than an accident of the environment. Every latency number in this
+document was measured without it.
+
+### 9.5 What it adds up to
+
+The same fixture as §4.2, swept rather than reported at one `k`:
+
+```
+  system                        R@1    R@2    R@5   R@10   R@20   separates   local  remote
+  llmwiki/hybrid               0.45   0.73   0.96   1.00   1.00         k=1      76       0
+  llmwiki/lexical              0.42   0.60   0.76   0.95   0.98         k=1      12       0
+  bm25                         0.40   0.59   0.74   0.90   0.95           —       2       0
+  dense                        0.47   0.86   0.97   0.99   0.99         k=1      71       0
+
+  Δrecall vs bm25                k=1     k=2     k=5    k=10    k=20
+  llmwiki/hybrid              +0.05*  +0.14*  +0.22*  +0.10*  +0.05*
+                              * paired bootstrap 95% CI excludes zero
+```
+
+And on atlas, at the k where that corpus can still separate anything:
+
+```
+  system                     R@1    R@2    R@3    R@5   R@10   separates   local  remote
+  llmwiki/full              0.76   0.90   0.92   0.98   1.00         k=5      14     342
+  llmwiki/full/no-graph     0.76   0.90   0.92   0.93   0.95        none       6       0
+  bm25                      0.67   0.83   0.88   0.90   0.95           —       0       0
+  dense                     0.74   0.85   0.88   0.93   0.95        none       6     324
+```
+
+Three readings. The advantage over bm25 keeps its sign at every `k` and its
+interval excludes zero at every `k`, which the k=10 headline in §4.2 could not
+have shown in either direction. `separates: none` on the no-graph row is the
+sharpest available statement of what the graph lane is worth — without it,
+llmwiki does not beat bm25 with confidence at any `k` on atlas. And the latency
+column finally says what it means: 14 ms of local work against bm25's under 1,
+plus 342 ms rented from an embedding provider that the `dense` baseline rents
+from too.
+
+**One thing did not get fixed.** On HotpotQA the hybrid still scores below the
+`dense` baseline at k ≤ 5 — 0.73 against 0.86 at k=2 — and above it at k ≥ 10.
+That corpus's lexical lane is 0.60 at k=2 against the vector lane's 0.86, and
+equal-weight RRF lands almost exactly between them, which is what equal-weight
+RRF is for. On atlas the hybrid beats both of its lanes at every k. Two repairs
+were measured and both were worse: weighting the lanes by their own score margin
+fails because BM25 margins (0.5–0.7) and cosine margins (0.1–0.25) are not
+comparable, and treating an unranked document as ranked one past the lane's
+depth moves nothing. Calibrating per lane would need labelled data, and the only
+labelled data here is the eval. The shortfall is declared rather than tuned away,
+and `compare` now prints it and exits non-zero without anyone having to notice.
+
+---

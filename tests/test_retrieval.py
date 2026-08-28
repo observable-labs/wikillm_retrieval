@@ -333,3 +333,46 @@ def test_lanes_can_be_switched_off_for_an_ablation(wiki):
     response = search(wiki, "alpha", top_k=5, include_sources=False, options=options)
     assert response.lanes.graph is False
     assert response.graph_hits == 0
+
+
+def test_the_seed_set_is_the_window_the_caller_asked_for():
+    """A diffusion driven by documents that will not be shown decides the one that is.
+
+    With a fixed five seeds and `limit=1`, four of the five documents radiating
+    mass are outside the result window entirely — so the graph lane's
+    contribution changes sign with `k`, which is re-ranking inside a window
+    rather than retrieving better. `seed_count=0` resolves to `limit`.
+    """
+    fused = [(letter, 1.0 / (3 + rank)) for rank, letter in enumerate("abcdef", start=1)]
+    adjacency = {"e": {"z": 1.0}, "z": {"e": 1.0}}
+
+    def order(**kwargs):
+        return [path for path, _ in rank_by_ppr(fused, adjacency, **kwargs)]
+
+    assert order(limit=2, seed_count=0) == order(limit=2, seed_count=2)
+    assert order(limit=6, seed_count=0) == order(limit=6, seed_count=6)
+    # An explicit count still wins, so the ablation lanes keep working: with one
+    # seed only `a` radiates, so `z` is never reached at all.
+    assert "z" not in order(limit=6, seed_count=1)
+    assert "z" in order(limit=6, seed_count=0)
+
+
+def test_fusion_prefers_a_lane_that_is_certain_over_two_that_are_lukewarm():
+    """RRF's constant has to be scaled to the depth of the lists being fused.
+
+    At the published 60, a document one lane ranks first scores 1/61 = 0.0164
+    while a document both lanes rank tenth scores 2/70 = 0.0286 and outranks it:
+    on lists of 20 to 50 the constant sits above the whole list and flattens it,
+    so a lane that is merely adequate outvotes one that is good.
+    """
+    from llmwiki.retrieval.graph import RRF_K
+    from llmwiki.retrieval.pipeline import _fuse
+
+    class Index:
+        by_path = {"certain.md": object(), "lukewarm.md": object()}
+
+    fused = _fuse({"lukewarm.md": 10}, {"certain.md": 1, "lukewarm.md": 10}, Index(), RRF_K)
+    assert fused[0][0] == "certain.md"
+
+    inherited = _fuse({"lukewarm.md": 10}, {"certain.md": 1, "lukewarm.md": 10}, Index(), 60.0)
+    assert inherited[0][0] == "lukewarm.md", "which is the behaviour being replaced"

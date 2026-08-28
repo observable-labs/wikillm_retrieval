@@ -79,7 +79,15 @@ def test_mismatched_dimensions_are_ignored_not_crashed(tmp_path):
     assert [hit.page_id for hit in hits] == ["wiki/new.md"]
 
 
-def test_page_score_blends_best_chunk_with_a_capped_tail():
+def test_a_page_scores_its_best_chunk_and_chunk_count_buys_nothing():
+    """Coverage must not outrank quality, however much of it there is.
+
+    The rule this replaces added a capped share of the remaining chunk scores.
+    Cosine similarities sit in a narrow band, so the cap was reached at three
+    chunks and every multi-chunk page saturated at 1.00 — which on the atlas
+    corpus put the fourteen raw sources at the head of the vector ranking for
+    every query and cost recall@1 0.705 -> 0.023.
+    """
     from llmwiki.embeddings import ChunkHit
 
     def score(chunk_scores):
@@ -87,14 +95,30 @@ def test_page_score_blends_best_chunk_with_a_capped_tail():
             [ChunkHit("wiki/a.md", i, "", "t", s) for i, s in enumerate(chunk_scores)]
         )[0].score
 
-    # The best chunk dominates when coverage is equal.
     assert score([0.9]) > score([0.3])
-    # Extra chunks help, but the tail contribution is capped, so a page can
-    # never exceed 1.0 no matter how many mediocre chunks it has.
-    assert score([0.3] * 4) > score([0.3])
-    assert score([0.3] * 500) <= 1.0
-    # Once the tail hits the cap, further chunks pay out nothing at all.
-    assert score([0.3] * 500) == score([0.3] * 9) == 1.0
+    assert score([0.3] * 500) == score([0.3])
+    # One excellent chunk beats any amount of mediocre coverage.
+    assert score([0.85]) > score([0.6] * 50)
+
+
+def test_the_vector_ranking_does_not_depend_on_how_deep_the_scan_went():
+    """Scan depth is a latency constant; it must not be a quality constant.
+
+    `_vector_lane` scans `max(3 * max(2k, 20), 30)` chunks and the dense
+    baseline scans `max(30, 3k)`. Under the old tail term those two produced
+    different page orders from the same store, which is how the assembled
+    pipeline came to score below a baseline built from one of its own lanes.
+    """
+    from llmwiki.embeddings import ChunkHit
+
+    chunks = [
+        ChunkHit("wiki/deep.md", 0, "", "t", 0.61),
+        ChunkHit("wiki/sharp.md", 0, "", "t", 0.60),
+    ] + [ChunkHit("wiki/deep.md", i, "", "t", 0.59) for i in range(1, 8)]
+
+    shallow = [page.page_id for page in group_by_page(chunks[:2], top_k=2)]
+    deep = [page.page_id for page in group_by_page(chunks, top_k=2)]
+    assert shallow == deep == ["wiki/deep.md", "wiki/sharp.md"]
 
 
 def test_search_falls_back_to_keyword_when_the_embedder_is_down(wiki, settings, monkeypatch):
@@ -188,7 +212,12 @@ def test_reindex_skips_unchanged_pages(wiki, settings, monkeypatch):
 
     assert first["indexed"] == len(documents)
     assert second["indexed"] == 0 and second["skipped"] == len(documents)
-    assert len(calls) == len(documents), "unchanged pages must not be re-embedded"
+    # One request for the whole pass, not one per page. Batching within a
+    # document never fires on a wiki of short pages — every page is one chunk —
+    # so the batch is filled from as many documents as it holds.
+    assert len(calls) == 1, "chunks must be batched across documents"
+    assert sum(calls) == len(documents), "and each page embedded exactly once"
 
     forced = index_documents(wiki, documents, settings.embedding, force=True)
     assert forced["indexed"] == len(documents)
+    assert sum(calls) == 2 * len(documents), "and re-embedded exactly once on --force"

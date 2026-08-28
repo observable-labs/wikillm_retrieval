@@ -26,8 +26,13 @@ dependencies = []
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=1.0"]
+# The vector lane runs without it and is measurably slower: brute-force cosine
+# over 9,931 chunks is 269 ms a query in pure Python against 5.6 ms with it.
+# Declared so that "which one was measured" is a configuration rather than an
+# accident of the environment.
+vector = ["numpy>=1.24"]
 docs = ["pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1", "python-pptx>=0.6.23"]
-all = ["anthropic>=1.0", "pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1", "python-pptx>=0.6.23"]
+all = ["anthropic>=1.0", "numpy>=1.24", "pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1", "python-pptx>=0.6.23"]
 
 [project.scripts]
 llmwiki = "llmwiki.cli:main"

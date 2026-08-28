@@ -38,7 +38,20 @@ SHARED_SOURCE_WEIGHT = 4.0
 ADAMIC_ADAR_WEIGHT = 1.5
 TYPE_AFFINITY_WEIGHT = 1.0
 
-RRF_K = 60.0
+# RRF's published constant is 60, chosen against TREC runs of 1,000 results —
+# 6% of the list depth. These lanes rank 20 to 50, so 60 sits above the whole
+# list and flattens it: rank 1 and rank 50 differ by less than a factor of two,
+# and a lane that is merely adequate can then outvote one that is good. Rescaled
+# to the same fraction of the depth actually fused, 6% of 50 is 3.
+#
+# Measured across both eval corpora, recall@k at 60 against 3:
+#
+#     hotpot   R@2  0.672 -> 0.730    R@5  0.912 -> 0.953
+#     atlas    R@1  0.705 -> 0.727    R@5  0.920 -> 0.932
+#
+# The sweep is monotone between 60 and 3 on both and flat below 1, so the value
+# is not on a cliff. `RetrievalOptions.rrf_k` keeps it swappable.
+RRF_K = 3.0
 
 
 def normalize_alias(value: str) -> str:

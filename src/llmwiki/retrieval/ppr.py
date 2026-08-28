@@ -43,10 +43,27 @@ DEFAULT_ALPHA = 0.15
 DEFAULT_ITERATIONS = 60
 TOLERANCE = 1e-8
 
-# How many of the fused results radiate. Seeding from the whole window instead
-# concentrates mass on hubs and dilutes exactly the bridge signal the lane
-# exists to find, which is why SPRIG restricts it to the head of the list.
-DEFAULT_SEEDS = 5
+# How many of the fused results radiate. `0` means "as many as the caller asked
+# for", which is the only value that does not make the lane's sign depend on the
+# window: seeding a fixed 5 while returning 1 lets a diffusion driven by four
+# documents that will not be shown decide the one that is.
+#
+# That was measurable and was measured. With five fixed seeds the graph lane's
+# contribution changes sign with k — on HotpotQA +0.007 at k=5 and -0.032 at
+# k=2 — which is re-ranking inside a window, not retrieving better. Tying the
+# seed count to the window removes the sign change on both corpora:
+#
+#     hotpot   no graph  0.453 0.730 0.953 0.990 0.998   (k = 1, 2, 5, 10, 20)
+#              seeds=5   0.450 0.698 0.960 0.993 0.998
+#              seeds=k   0.453 0.730 0.960 0.998 1.000
+#     atlas    no graph  0.727 0.864 0.886 0.909 0.920
+#              seeds=5   0.727 0.875 0.932 0.955 0.955
+#              seeds=k   0.727 0.864 0.932 0.955 0.955
+#
+# `seeds=k` is at or above no-graph at every k on both, which `seeds=5` is not.
+# It costs one question of atlas R@2 against the fixed value, and buys the one
+# property that makes the lane safe to leave on at any k.
+DEFAULT_SEEDS = 0
 
 # What the rest of the fused list gets, as a fraction of its own rank weight.
 # Zero is SPRIG's literal reading: the tail does not radiate, and `rank_by_ppr`
@@ -193,8 +210,13 @@ def rank_by_ppr(
     """
     if not fused:
         return []
+    # `0` is "as many seeds as results were asked for". Resolved here rather
+    # than by the caller because `limit` is the only place the window is known,
+    # and a seed set larger than the window is what made the lane's sign depend
+    # on k.
+    seeds = seed_count if seed_count > 0 else max(1, limit)
     scores = personalized_pagerank(
-        seed_masses(fused, seed_count=seed_count, tail_weight=tail_weight),
+        seed_masses(fused, seed_count=seeds, tail_weight=tail_weight),
         adjacency,
         alpha=alpha,
         iterations=iterations,

@@ -51,12 +51,18 @@ MAX_TOP_K = 50
 CANDIDATE_MULTIPLIER = 5
 MIN_CANDIDATES = 50
 
-# The vector lane votes shallower than the lexical one. RRF's contribution is
-# 1/(k + rank), which between rank 1 and rank 50 varies by less than a factor of
-# two — so a lane allowed to rank most of the corpus casts a near-uniform vote
-# on most of the corpus, and its noise reaches documents it has no opinion
-# about. Measured on the atlas suite: capping the vector lane at 2k recovered
-# 0.10 MRR against letting it rank as deep as the lexical lane.
+# How deep the vector lane votes. The cap was introduced because letting the
+# lane rank as deep as the lexical one cost 0.10 MRR on atlas — but that
+# measurement was taken while `group_by_page` scored a page by chunk count as
+# much as by chunk quality, so scanning deeper pulled in more multi-chunk pages
+# and every one of them saturated at the top. With a page scored by its best
+# chunk the ranking is prefix-stable in the scan depth, and re-sweeping both
+# corpora at 2k, 5k, 10k and 20k moves no recall at any k at all.
+#
+# The cap therefore stays for latency and nothing else: a deeper scan buys
+# nothing and costs a longer dot-product pass. It is no longer load-bearing for
+# quality, and that is the point — a depth constant that changes results is a
+# tuning parameter nobody swept.
 VECTOR_DEPTH_MULTIPLIER = 2
 MIN_VECTOR_DEPTH = 20
 
@@ -73,11 +79,11 @@ class RetrievalOptions:
 
     lexical_bm25: bool = True
     vector: bool = True
-    # How sharply fusion prefers rank 1 over rank n, and how deep each lane
-    # votes. RRF's published constant is 60, tuned on TREC-scale result lists;
-    # on a corpus of a few hundred documents a lane ranking 50 of them casts 50
-    # near-identical votes, and a lane that is merely adequate then drags down
-    # one that is good. Both are measured, not inherited.
+    # How sharply fusion prefers rank 1 over rank n. RRF's published constant is
+    # 60, tuned on TREC-scale result lists of 1,000; these lanes rank 20 to 50,
+    # where 60 sits above the whole list and a lane that is merely adequate
+    # outvotes one that is good. Rescaled to the depth actually fused. Measured,
+    # not inherited — see `graph.RRF_K`.
     rrf_k: float = RRF_K
     vector_depth: int = 0  # 0 = max(2k, 20); see VECTOR_DEPTH_MULTIPLIER
     graph_ppr: bool = True
@@ -85,7 +91,7 @@ class RetrievalOptions:
     curated_links: bool = True
     mentions_per_document: int = MAX_MENTIONS_PER_DOCUMENT
     mention_scale: float = MENTION_SCALE
-    seed_count: int = DEFAULT_SEEDS
+    seed_count: int = DEFAULT_SEEDS  # 0 = as many as the caller asked for
     tail_weight: float = DEFAULT_TAIL_WEIGHT
     alpha: float = DEFAULT_ALPHA
     iterations: int = DEFAULT_ITERATIONS
@@ -236,7 +242,7 @@ def search(
     results = _materialize(
         ranked,
         index=index,
-        seeds={path for path, _ in fused[: max(1, options.seed_count)]},
+        seeds={path for path, _ in fused[: max(1, options.seed_count or limit)]},
         fused={path for path, _ in fused},
         vector_score=vector_score,
         tokens=effective_tokens,

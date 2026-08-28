@@ -26,6 +26,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from .calibration import LexicalCalibration, calibrate
 from .entities import MAX_MENTIONS_PER_DOCUMENT, EntityIndex, build_entity_index
 from .graph import WikiGraph, build_graph, relevance
 from .keyword import Document, load_documents
@@ -67,6 +68,7 @@ class SearchIndex:
     _adjacency: dict = field(default_factory=dict, repr=False)
     _transitions: dict = field(default_factory=dict, repr=False)
     _by_path: dict = field(default_factory=dict, repr=False)
+    _calibration: LexicalCalibration | None = field(default=None, repr=False)
 
     @property
     def by_path(self) -> dict[str, Document]:
@@ -133,6 +135,22 @@ class SearchIndex:
                 self_weight,
             )
         return self._transitions[key]
+
+    def calibration(self) -> LexicalCalibration:
+        """What a well-aimed query scores here — the abstention fence. Cached.
+
+        Beside the index rather than in the pipeline because it is a property of
+        the corpus, it costs a few hundred FTS5 queries to build, and it has
+        exactly the same lifetime as the index it is derived from: the corpus
+        fingerprint that invalidates one invalidates the other, so the fence can
+        never be stale with respect to the documents it was measured on.
+
+        Lazy rather than built eagerly, because a caller that never fuses two
+        lanes never needs it and should not pay 150 ms for it.
+        """
+        if self._calibration is None:
+            self._calibration = calibrate(self.documents, self.lexical)
+        return self._calibration
 
     def close(self) -> None:
         if self.lexical is not None:

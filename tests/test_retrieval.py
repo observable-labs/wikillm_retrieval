@@ -376,3 +376,95 @@ def test_fusion_prefers_a_lane_that_is_certain_over_two_that_are_lukewarm():
 
     inherited = _fuse({"lukewarm.md": 10}, {"certain.md": 1, "lukewarm.md": 10}, Index(), 60.0)
     assert inherited[0][0] == "lukewarm.md", "which is the behaviour being replaced"
+
+
+# ── the confidence gate (representative-questions R1/R2) ──────────────────
+
+def test_calibration_is_the_corpus_own_score_distribution():
+    """A raw BM25 score means nothing across corpora, so the fence is derived
+    from what a query naming something *in this corpus* scores.
+
+    Titles are the reference queries: they need no labels, no provider call and
+    no hand-tuned constant, and they are regenerated whenever the index is.
+    """
+    from llmwiki.retrieval.calibration import calibrate
+
+    documents = _documents(
+        ("wiki/a.md", "Xenon Hall Thruster", "xenon hall thruster ionised propellant"),
+        ("wiki/b.md", "Isogrid Primary Structure", "isogrid primary structure launch loads"),
+        ("wiki/c.md", "Louvre Radiator Panel", "louvre radiator panel waste heat"),
+        ("wiki/d.md", "Watchdog Flight Computer", "watchdog flight computer guidance loop"),
+    )
+    index = build_index(documents)
+    calibration = calibrate(documents, index.lexical, quantile=0.0)
+
+    assert calibration.sampled == 4
+    assert calibration.fence > 0.0
+    # A query naming a document scores at or above the fence; one that names
+    # nothing in the corpus scores nothing at all.
+    named = index.lexical.search(tokenize_query("Louvre Radiator Panel"), 1)
+    assert named and named[0].score >= calibration.fence
+    assert not index.lexical.search(tokenize_query("wobbleflange quintaped"), 1)
+    assert calibration.abstains(0.0)
+    assert not calibration.abstains(calibration.fence)
+
+
+def test_a_calibration_that_cannot_be_built_never_gates():
+    """Failing open is deliberate: a fence that cannot be computed must not
+    silently remove a lane, because the failure would be invisible and would
+    look like a ranking change."""
+    from llmwiki.retrieval.calibration import calibrate
+
+    empty = calibrate([], None)
+    assert empty.fence == 0.0
+    assert not empty.abstains(0.0), "no reference distribution means no gate"
+
+
+def test_a_lane_with_nothing_to_say_does_not_drag_the_fused_ranking_down(wiki):
+    """The defect R1 exists to fix, at the level the ranker can be tested at.
+
+    Equal-weight RRF gives a lane that found nothing the same vote as one that
+    found the answer, so fusing a lane scoring near zero with a lane scoring
+    well lands between them. With the gate the fused ranking is the competent
+    lane's ranking; without it, it is not.
+    """
+    from llmwiki.retrieval.pipeline import _fuse
+
+    index = build_index(_documents(
+        ("wiki/a.md", "Alpha", "alpha body"),
+        ("wiki/b.md", "Bravo", "bravo body"),
+        ("wiki/c.md", "Charlie", "charlie body"),
+    ))
+    strong = {"wiki/c.md": 1, "wiki/b.md": 2, "wiki/a.md": 3}
+    noise = {"wiki/a.md": 1, "wiki/b.md": 2, "wiki/c.md": 3}
+
+    alone = [path for path, _ in _fuse({}, strong, index)]
+    diluted = [path for path, _ in _fuse(noise, strong, index)]
+    gated = [path for path, _ in _fuse({}, strong, index)]
+
+    assert alone[0] == "wiki/c.md"
+    assert diluted[0] != "wiki/c.md", "equal weights let the noise lane win the top slot"
+    assert gated == alone, "an abstaining lane leaves the competent ranking untouched"
+    # And the continuous form of the same instrument, for the weak-but-not-empty
+    # case a gate is the wrong tool for.
+    weighted = [path for path, _ in _fuse(noise, strong, index, lexical_weight=0.1)]
+    assert weighted[0] == "wiki/c.md"
+
+
+def test_the_response_reports_an_abstention_as_an_abstention(wiki):
+    """Not as a lane that was off, and not as a lane that failed.
+
+    A caller comparing two configurations has to be able to tell a working gate
+    from a broken lane, and the only way to do that from outside is for the
+    pipeline to say which it was.
+    """
+    _page(wiki, "wiki/alpha.md", "Alpha", "alpha body text")
+    _page(wiki, "wiki/bravo.md", "Bravo", "bravo body text")
+    index = open_index(wiki, include_sources=False, use_cache=False)
+
+    # No vector lane, so there is nothing to fall back to and the lexical lane
+    # must vote however badly it scored: a ranking from a weak lane beats none.
+    response = search(wiki, "wobbleflange quintaped", top_k=5, index=index,
+                      options=RetrievalOptions())
+    assert response.lanes.abstained == ()
+    assert response.lanes.lexical

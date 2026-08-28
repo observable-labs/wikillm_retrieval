@@ -196,6 +196,7 @@ def cmd_ask(args, printer: Printer) -> int:
         top_k=args.top_k,
         include_sources=None if args.sources is None else args.sources,
         on_token=on_token if streaming else None,
+        profile=getattr(args, "profile", None),
     )
 
     if args.json:
@@ -273,12 +274,15 @@ def _via(names: list[str], limit: int = 3) -> str:
 def cmd_search(args, printer: Printer) -> int:
     project = project_module.open_project(args.project)
     settings = config.load(project.root, _overrides(args))
+    from .retrieval.profiles import resolve as resolve_profile
+
     response = search(
         project,
         " ".join(args.query),
         top_k=args.top_k,
         include_sources=settings.search_sources if args.sources is None else args.sources,
         embedding_config=settings.embedding,
+        options=resolve_profile(getattr(args, "profile", None)).options,
     )
 
     if args.json:
@@ -516,6 +520,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(add, project_required=True)
     add.set_defaults(func=cmd_add)
 
+    def _add_profile(sub) -> None:
+        """Which lane to trust, not merely how deep to look.
+
+        Kept off the common block deliberately: it applies to the two commands
+        that retrieve and would be noise on `init`, `add` and `embed`.
+        """
+        from .retrieval.profiles import PROFILES
+
+        sub.add_argument(
+            "--profile",
+            choices=sorted(PROFILES),
+            default=None,
+            help="retrieval profile: "
+                 + "; ".join(f"{n} — {p.description}" for n, p in sorted(PROFILES.items())),
+        )
+
     ask_parser = subparsers.add_parser("ask", help="ask a question, retrieving over the whole project")
     ask_parser.add_argument("question", nargs="+")
     ask_parser.add_argument("--top-k", type=int, default=20, help="pages to retrieve (default 20)")
@@ -532,6 +552,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="retrieve over wiki pages only",
     )
+    _add_profile(ask_parser)
     _add_common(ask_parser, project_required=True)
     ask_parser.set_defaults(func=cmd_ask)
 
@@ -540,6 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--top-k", type=int, default=10)
     search_parser.add_argument("--sources", dest="sources", action="store_true", default=None)
     search_parser.add_argument("--no-sources", dest="sources", action="store_false")
+    _add_profile(search_parser)
     _add_common(search_parser)
     search_parser.set_defaults(func=cmd_search)
 

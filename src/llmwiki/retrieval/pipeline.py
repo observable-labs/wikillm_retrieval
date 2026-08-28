@@ -27,6 +27,7 @@ from pathlib import Path
 
 from ..config import EmbeddingConfig
 from ..errors import ProviderError
+from .calibration import ABSTAIN_QUANTILE
 from .entities import MAX_MENTIONS_PER_DOCUMENT, EntityIndex
 from .graph import RRF_K, WikiGraph
 from .index import MENTION_SCALE, SearchIndex, open_index
@@ -79,6 +80,31 @@ class RetrievalOptions:
 
     lexical_bm25: bool = True
     vector: bool = True
+    # Whether a lane that found nothing may abstain instead of voting. Equal
+    # weights are right when both lanes are competent and wrong when one has no
+    # handhold at all: on questions phrased without any of the corpus's own
+    # vocabulary the lexical lane still returns fifty documents and RRF still
+    # counts that ranking as evidence, which cost 0.21 recall at k=10 against
+    # the vector lane alone. The fence is the corpus's own score distribution,
+    # not a constant — see `calibration.py`.
+    lexical_gate: bool = True
+    # Where in the corpus's own score distribution the abstention fence sits.
+    # A profile's instrument: `research` is more sceptical of the lexical lane
+    # than `balanced` because the questions it is for are phrased without the
+    # corpus's vocabulary, and the fence is the one dial that says so.
+    abstain_quantile: float = ABSTAIN_QUANTILE
+    # How much each lane's vote is worth in fusion. Equal by default, which is
+    # what RRF assumes and what every measurement before profiles existed was
+    # taken under. A weight is the continuous form of the gate above: the gate
+    # is the right instrument when a lane has *no* handhold, and a weight is the
+    # right one when it has a weak one, which is most of a real question set.
+    lexical_weight: float = 1.0
+    vector_weight: float = 1.0
+    # Whether diffusion is skipped when the lexical lane abstained. Seeding PPR
+    # from a fused list the lexical lane could not rank is diffusing from a
+    # ranking with no lexical evidence in it, and it is measurably worse than
+    # not diffusing at all on exactly those queries.
+    graph_gate: bool = True
     # How sharply fusion prefers rank 1 over rank n. RRF's published constant is
     # 60, tuned on TREC-scale result lists of 1,000; these lanes rank 20 to 50,
     # where 60 sits above the whole list and a lane that is merely adequate
@@ -111,6 +137,12 @@ class LanesRun:
     lexical: bool = False
     vector: bool = False
     graph: bool = False
+    # Lanes that were configured, available, and chose not to contribute to this
+    # query. Distinct from a lane that is off (it would not be configured) and
+    # from one that failed (it would leave a note): an abstention is the
+    # configuration working, and reporting it as either of the other two would
+    # make a working gate look like a broken lane.
+    abstained: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, bool]:
         return {"lexical": self.lexical, "vector": self.vector, "graph": self.graph}
@@ -203,13 +235,48 @@ def search(
                 # takes. The note is what stops that being invisible.
                 notes.append(f"vector search unavailable, using keyword search only ({exc})")
 
-    # ── S1c: fusion ───────────────────────────────────────────────────
-    fused = _fuse(lexical_rank, vector_rank, index, options.rrf_k)
+    # ── S1b'/S1c: abstention, then fusion ─────────────────────────────
+    # A lane with nothing to say should not get an equal vote. The lexical lane
+    # abstains when its own top score falls below what a well-aimed query scores
+    # on this corpus — and only when there is another lane to fall back on,
+    # because a ranking from a lane that found little is still better than no
+    # ranking at all.
+    abstain = False
+    if options.lexical_gate and vector_rank and lexical_ranked:
+        calibration = index.calibration()
+        top_score = lexical_ranked[0][1]
+        if calibration.abstains(top_score, options.abstain_quantile):
+            abstain = True
+            lanes.abstained += ("lexical",)
+            notes.append(
+                f"the lexical lane scored {top_score:.2f}, below the "
+                f"{options.abstain_quantile:.0%} mark of what a query naming "
+                f"something in this corpus scores "
+                f"({calibration.fence_at(options.abstain_quantile):.2f} over "
+                f"{calibration.sampled} sampled titles); it abstained rather "
+                "than diluting the ranking"
+            )
+            lexical_rank = {}
+
+    fused = _fuse(
+        lexical_rank,
+        vector_rank,
+        index,
+        options.rrf_k,
+        options.lexical_weight,
+        options.vector_weight,
+    )
 
     # ── S2: seeded PPR ────────────────────────────────────────────────
     ranked = fused[:limit]
     graph_hits = 0
-    if options.graph_ppr and fused:
+    if options.graph_ppr and abstain and options.graph_gate:
+        # Nothing to diffuse *from*. The fused list is the vector lane's ranking
+        # alone, so seeding PPR from it spreads mass through a graph built out
+        # of entity mentions on the strength of no lexical evidence whatever —
+        # which on the keyword-hostile suite costs 0.03 recall at k=3 and 64 ms.
+        lanes.abstained += ("graph",)
+    elif options.graph_ppr and fused:
         adjacency = index.adjacency(
             entity_edges=options.entity_edges,
             curated_links=options.curated_links,
@@ -325,6 +392,8 @@ def _fuse(
     vector_rank: dict[str, int],
     index: SearchIndex,
     rrf_k: float = RRF_K,
+    lexical_weight: float = 1.0,
+    vector_weight: float = 1.0,
 ) -> list[tuple[str, float]]:
     """Reciprocal-rank fusion over whichever lanes produced a ranking.
 
@@ -332,13 +401,23 @@ def _fuse(
     its rank, so the ordering is untouched — and having one scale for the fused
     score is what lets PPR's restart masses mean the same thing whether or not
     the vector lane ran.
+
+    Weights default to 1.0 and are a profile's instrument, not a per-query one.
+    Nothing here calibrates them: a weight derived from a lane's own score margin
+    was tried and was worse on both corpora, because BM25 margins (0.5-0.7) and
+    cosine margins (0.1-0.25) are not comparable quantities. What is comparable
+    is a lane against *itself* on the same corpus, which is what the abstention
+    gate uses; a weight is the caller saying which lane this kind of question
+    should trust, which is a decision the caller has and the ranker does not.
     """
     known = index.by_path
     scores: dict[str, float] = {}
-    for ranks in (lexical_rank, vector_rank):
+    for ranks, weight in ((lexical_rank, lexical_weight), (vector_rank, vector_weight)):
+        if weight <= 0.0:
+            continue
         for path, rank in ranks.items():
             if path in known:
-                scores[path] = scores.get(path, 0.0) + 1.0 / (rrf_k + rank)
+                scores[path] = scores.get(path, 0.0) + weight / (rrf_k + rank)
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
@@ -439,8 +518,14 @@ def _title_match(document: Document, tokens: list[str], query_phrase: str) -> bo
 
 
 def _mode(lanes: LanesRun) -> str:
-    """The label, derived from what ran and nothing else."""
-    if lanes.vector and lanes.lexical:
+    """The label, derived from what ran and nothing else.
+
+    A lane that abstained did not contribute a ranking, so a query where the
+    lexical lane stood down is a `vector` query however it was configured. The
+    label describes the ranking that was produced, which is the only thing a
+    caller comparing two of them can act on.
+    """
+    if lanes.vector and lanes.lexical and "lexical" not in lanes.abstained:
         return "hybrid"
     if lanes.vector:
         return "vector"

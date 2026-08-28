@@ -28,7 +28,7 @@ from .errors import (
 )
 from .ingest import IngestResult, ingest_document
 from .project import Project, create, open_project
-from .query import Answer, ask
+from .query import Answer, answer_from, ask
 from .retrieval import search
 
 __version__ = "0.1.0"
@@ -47,6 +47,7 @@ __all__ = [
     "ProviderError",
     "Settings",
     "__version__",
+    "answer_from",
     "ask",
     "create",
     "ingest_document",

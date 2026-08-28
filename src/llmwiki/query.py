@@ -90,17 +90,55 @@ def ask(
     include_sources: bool | None = None,
     history: list[tuple[str, str]] | None = None,
     on_token=None,
+    profile: str | None = None,
+    options=None,
 ) -> Answer:
-    """Retrieve over the whole project, then answer with citations."""
+    """Retrieve over the whole project, then answer with citations.
+
+    `profile` selects a named retrieval configuration — how deep to look and
+    which lane to trust. The default is the shipped one, so this argument
+    changes nothing unless a caller asks it to; `research` is the one that leans
+    on the vector lane, for questions asked before the user knows what the
+    corpus calls things. `options` overrides it outright, for a caller — an
+    ablation, a harness — holding a configuration rather than a name.
+    """
+    from .retrieval.profiles import resolve as resolve_profile
+
     include = settings.search_sources if include_sources is None else include_sources
+    selected = options if options is not None else resolve_profile(profile).options
     response = search(
         project,
         question,
         top_k=top_k,
         include_sources=include,
         embedding_config=settings.embedding,
+        options=selected,
+    )
+    return answer_from(
+        project, question, settings, response,
+        history=history, on_token=on_token,
     )
 
+
+def answer_from(
+    project,
+    question: str,
+    settings: Settings,
+    response: SearchResponse,
+    history: list[tuple[str, str]] | None = None,
+    on_token=None,
+) -> Answer:
+    """Phases 3 and 4 alone: pack a ranking that already exists, then answer it.
+
+    Split out of `ask` so that "generate an answer from *these* results" is a
+    first-class operation. An evaluation harness comparing two retrievers on the
+    text a user actually reads has to hold the generator fixed and vary only the
+    ranking, and it cannot do that through a function that insists on doing the
+    retrieval itself. The baseline that this makes possible — a lexical retriever
+    answered by the same model with the same prompt and the same budget — is the
+    only way to attribute a difference in answers to retrieval rather than to
+    everything else.
+    """
     budget = compute_context_budget(settings.llm.max_context_size)
     packed, citations = _pack_context(response.results, budget.page_budget, budget.max_page_size)
 

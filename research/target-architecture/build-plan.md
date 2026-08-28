@@ -4,7 +4,25 @@ The executable form of [README.md](README.md). That document argues for the
 architecture; this one says what to write, in what order, and how you will know
 each step worked.
 
-Written 2026-08-27 against `216d96f`. Nothing here is started.
+Written 2026-08-27 against `216d96f`. Status updated 2026-08-27 after steps 3–8
+and half of 10 landed.
+
+| Step | | Step | |
+|---|---|---|---|
+| 0 baseline | partial — latency measured, corpus is a fixture | 8 seeded PPR | **done** |
+| 1 durability | open | 9 profiles | open |
+| 2 one database | open — the caches are in process, not on disk | 10 source chunks | **half** — sources embedded; two-tier freshness not built |
+| 3 eval set | **done, relocated** — see below | 11 rerank | open |
+| 4 L1 text cache | **done, in process** | 12 topic pages | open |
+| 5 L2 lexical | **done** | 13 agentic rung | open |
+| 6 L5 links | **done, in process** | 14 rebuild | open |
+| 7 L4 entities | **done** | 15 later | open |
+
+What the completed steps measured is in
+[`../../future_work/retrieval-rebuild/`](../../future_work/retrieval-rebuild/README.md).
+Read that before trusting any effect size quoted below: the numbers in this
+document are the literature's, and the ones that reproduced did so with different
+magnitudes.
 
 **Supersedes** the P0–P8 ordering in
 [`../../future_work/retrieval-vs-sota/work-items.md`](../../future_work/retrieval-vs-sota/work-items.md),
@@ -205,8 +223,22 @@ the index consistent; `vectors.db` migrates without re-embedding.
 
 ## Step 3 — Eval set
 
+> **Done, and relocated.** The harness is not `src/llmwiki/eval/`; it is
+> `ragharness`, a standalone zero-dependency package in a sibling repository,
+> which is what [`../evaluation/harness-v1.md`](../evaluation/harness-v1.md) §3.1
+> argued for and what lets it hold llmwiki, a BM25 baseline and a dense baseline
+> side by side on the same questions. A harness welded to `search()` can only
+> measure llmwiki against llmwiki. Everything below still describes what it does;
+> the interface is `ragharness run --system llmwiki`, not `llmwiki eval`.
+>
+> The harness had defects of its own, closed under
+> [`../evaluation/roadmaps/harness-self-validation.md`](../evaluation/roadmaps/harness-self-validation.md).
+> The one that matters for this plan: **it will score a configuration that never
+> ran.** Steps 5, 8, 11 and 12 each claim a measurable gain, and a harness that
+> reports a number under the wrong label cannot check any of them.
+
 **Goal:** the ability to tell whether steps 4–14 helped.
-**Touches:** new `src/llmwiki/eval/`, `cli.py`
+**Touches:** ~~new `src/llmwiki/eval/`~~ `space_brief/evaluation/ragharness`
 **Size:** half a day, mostly writing questions
 
 This is deliberately ahead of every optimization. Steps 4, 7, 8 and 11 each claim
@@ -316,6 +348,15 @@ baseline; this is the number every later step is measured against.
 
 ## Step 4 — L1 text cache
 
+> **Done in process, not on disk** — `retrieval/index.py` caches documents and
+> every structure derived from them against a fingerprint of the corpus (path,
+> size, mtime per file), so an edit invalidates it with no explicit invalidation
+> call anywhere. Rankings are unchanged, which was the acceptance criterion.
+> Retrieval on 1,991 documents went from 136 ms to 16 ms — though most of that
+> was not parsing: 70% was `Project.wiki_pages()` building `Path` objects and
+> calling `relative_to`, which resolves symlinks per file. The on-disk form still
+> needs step 2.
+
 **Goal:** stop re-parsing every PDF on every query.
 **Touches:** `parsers.py`, `retrieval/keyword.py`, `ingest/pipeline.py`
 **Size:** small
@@ -349,6 +390,13 @@ available and it changes no rankings.
 ---
 
 ## Step 5 — L2 lexical, via FTS5
+
+> **Done** — `retrieval/lexical.py`. Worth +0.05 MRR on the atlas suite against
+> the substring scorer. One correction to the design below: `SOURCE_SCORE_FACTOR`
+> was *not* preserved. BM25's length normalization produces the ordering the
+> factor existed to force, and keeping it cost 0.43 MRR on `intra-doc` questions,
+> whose gold is a raw source. It still applies on the CJK substring lane, which
+> has no length normalization and still needs it.
 
 **Goal:** a lexical lane that ranks by term *importance*, not term presence.
 **Touches:** new `index/lexical.py`; `retrieval/keyword.py` becomes a thin caller
@@ -395,6 +443,12 @@ was sufficient — record that and move on.
 
 ## Step 6 — L5 persisted links
 
+> **Done in process, not on disk** — same cache as step 4, and `relevance()` is
+> now reachable from `search()` for the first time: it is the edge weight for the
+> L5 half of the adjacency PPR diffuses over. Caveat recorded in the rebuild
+> notes — those weights were designed for a "related pages" panel and have never
+> been tuned *as* diffusion weights.
+
 **Goal:** stop rebuilding the whole link graph on every query.
 **Touches:** new `index/links.py`; `retrieval/graph.py`
 **Size:** small
@@ -422,6 +476,18 @@ pure relocation.
 ---
 
 ## Step 7 — L4 entity layer
+
+> **Done** — `retrieval/entities.py`. One structural correction: the graph is
+> **bipartite**. Entity nodes are distinct from the pages that name them, even
+> though every entity here is named by a page. Collapsing them was tried and is
+> wrong — it makes a page compete with the documents that mention it for the same
+> diffused mass, so a source quoting a page outranked the page.
+>
+> The layer is worth +0.06 recall@10 on HotpotQA, where there are no wikilinks
+> and it is the entire graph. On a densely linked wiki it is worth nothing and
+> costs a little, because every bridge already exists as a link — see
+> `MENTION_SCALE`, the dial between those two regimes, in
+> [`../../future_work/retrieval-rebuild/`](../../future_work/retrieval-rebuild/README.md) §5.
 
 **Goal:** a high-recall structural graph, at zero LLM cost.
 **Touches:** new `index/entities.py`
@@ -465,6 +531,20 @@ one does, it is a stopword-like title and belongs in the pruned set).
 ---
 
 ## Step 8 — S2: seeded PPR
+
+> **Done** — `retrieval/ppr.py`; `blend_graph_results` and `graph_result_quota`
+> are gone. The validation this section asks for was run: on 200 HotpotQA
+> questions over 1,991 pooled distractor paragraphs, RRF alone scores 0.90
+> recall@10 and seeded PPR scores 0.96. SPRIG's published direction is
+> 0.851 → 0.867; the direction reproduces, the magnitude does not transfer, and
+> the absolute numbers are not comparable because the corpora differ.
+>
+> Three departures from the parameters below were forced by measured failures:
+> seed mass is `1/rank` rather than the fused score (RRF scores differ by 2%
+> between rank 1 and rank 2, which is no prior at all), every node carries a
+> self-loop (without one, retained mass is decided by degree and a well-linked
+> page sinks), and iteration runs to a tolerance rather than for five steps
+> (five leaves ~44% of the error, and a two-node component oscillates).
 
 **Goal:** the +9.7-point multi-hop change.
 **Touches:** new `retrieval/ppr.py`; `retrieval/graph.py` (`blend_graph_results` retires)
@@ -556,6 +636,13 @@ on your corpus, and `deep` beats `balanced` on `multi-hop`.
 ---
 
 ## Step 10 — Source chunks and two-tier freshness
+
+> **Half done.** `index_documents` no longer filters `kind == "wiki"`, so `embed`
+> covers raw sources. That half turned out to be urgent rather than optional: RRF
+> adds a reciprocal for every document a lane ranked, so a vector index covering
+> only part of the corpus pushes everything it *cannot* rank below everything it
+> can. Switching the vector lane on dropped recall@5 from 1.00 to 0.79 before the
+> fix. Two-tier freshness — searchable in a second, compiled later — is not built.
 
 **Goal:** a document is findable seconds after `add`, not after compilation.
 **Touches:** `ingest/pipeline.py`, `embeddings.py`
@@ -725,6 +812,14 @@ them; one database means one transaction and no lock.
 you will ship them believing the claims, and you will not notice when one of them
 regresses a different query class — which is precisely what graph expansion is
 known to do to single-hop questions.
+
+*Observed, and worse than stated:* an eval set is necessary and not sufficient.
+The first harness reported two lane configurations as distinct rows with
+identical scores because one of them had silently not run, at a `k` where recall
+was 1.00 for every system on every tag. Both numbers were wrong and neither
+looked it. The harness needs its own regression suite before its output is
+evidence — see
+[`../evaluation/roadmaps/`](../evaluation/roadmaps/README.md).
 
 **Tuning `blend_graph_results` instead of replacing it.** The measured failure is
 the combination shape, not the quota. Score-blending a graph signal loses 6.9–9.5

@@ -17,6 +17,18 @@ Contents:
   interface, adapters, suite format, metrics, and the gap audit.
 - [benchmarking.md](benchmarking.md) — the survey of what already exists and how
   SOTA methods benchmark.
+- [roadmaps/](roadmaps/README.md) — corrective roadmaps written against a running
+  harness. Start with
+  [harness-self-validation.md](roadmaps/harness-self-validation.md): the harness
+  is built, and its first adversarial run showed it will score a configuration
+  that never ran. Now implemented.
+
+**Status, 2026-08-27.** Tier 0 and Tier 1 below are both built and run: a
+generated 78-document corpus with 44 questions, and 200 HotpotQA questions over
+1,991 pooled distractor paragraphs. What they measured is in
+[`../../future_work/retrieval-rebuild/`](../../future_work/retrieval-rebuild/README.md).
+Tier 2's growth protocol has hooks and has never been run; Tier 3 remains
+excluded by design.
 
 ---
 
@@ -152,6 +164,13 @@ step in the plan: you should reproduce roughly RRF 0.851 → seeded-PPR 0.867 on
 HotpotQA and 0.697 → 0.794 on 2Wiki. **If you do not reproduce the direction of
 that gap, the bug is in your PPR, not in your corpus** — and you would never learn
 that from a corpus-specific eval alone.
+
+*Run, and it paid for itself twice.* The direction reproduced — 0.90 → 0.96 on
+200 questions over a 1,991-paragraph pooled distractor corpus, wider than SPRIG's
+gap and not comparable in magnitude. More usefully, it was the only corpus that
+could tell the entity layer apart from the wikilink graph: HotpotQA has no links,
+so the two are confounded on any hand-written wiki fixture and separable here.
+2Wiki was not run; the dataset was not reachable from the mirror used.
 
 **Tier 2 is the one nobody else runs**, and it is your third constraint. Insert
 5% of the corpus, ten times, measuring at each step — accuracy, cost per

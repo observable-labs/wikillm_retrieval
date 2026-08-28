@@ -23,6 +23,7 @@ evidence behind it.
 | **[evaluation/](evaluation/README.md)** | **Where should evaluation start, what should it measure, and what suites already exist?** |
 | [evaluation/harness-v1.md](evaluation/harness-v1.md) | The buildable design for the first evaluation harness. |
 | [evaluation/benchmarking.md](evaluation/benchmarking.md) | Survey: how SOTA methods benchmark, and which public suites are worth running. |
+| [evaluation/roadmaps/](evaluation/roadmaps/README.md) | Corrective roadmaps written against a *running* harness, anchored to observed failures rather than design review. |
 | [tooling.md](tooling.md) | Which of these systems are installable packages, and which are papers to reimplement? |
 
 ## Conventions

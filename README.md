@@ -16,7 +16,7 @@ The ingest strategy, retrieval pipeline, prompts, scoring weights, and budget
 math are ported rather than reinvented.
 
 ```
-pip install llmwiki                # core: keyword + graph retrieval, no deps
+pip install llmwiki                # core: BM25 + graph retrieval, no deps
 pip install 'llmwiki[anthropic]'   # + the Anthropic SDK
 pip install 'llmwiki[docs]'        # + PDF / DOCX / XLSX / PPTX parsing
 pip install 'llmwiki[all]'         # everything
@@ -124,17 +124,46 @@ Retrieves across **everything in the project** — every wiki page and every raw
 source — then answers with numbered citations.
 
 ```
-Phase 1    tokenized keyword scoring (CJK-aware) over wiki/ and raw/sources/
-Phase 1.5  vector search over chunk embeddings                    [optional]
-Phase 2    reciprocal-rank fusion of the keyword and vector rankings
-Phase 3    graph expansion — the top hits' [[wikilink]] neighbours take a
-           reserved 15-30% of the result window
-Phase 4    budget-controlled packing: 50% of the context window for pages,
-           5% for the index, 15% held back for the response
+S1a   lexical ranking by BM25 (SQLite FTS5), title/headings/body weighted 10/5/1
+S1b   vector search over chunk embeddings                          [optional]
+S1c   reciprocal-rank fusion of the two rankings
+S2    personalized PageRank, seeded from the fused list, diffusing over the
+      [[wikilink]] graph and the entity-mention graph
+S3    budget-controlled packing: 50% of the context window for pages,
+      5% for the index, 15% held back for the response
 ```
 
-Graph expansion is what makes this more than keyword search: a page that
-never mentions your query still surfaces when a page that does links to it.
+The graph lane is what makes this more than keyword search: a page that never
+mentions your query still surfaces when a page that does links to it, or when
+both are about the same named thing.
+
+It is applied as a **re-ranking of the fused list**, not as a reserved slice of
+the window. That distinction is measured, not stylistic: seeding PageRank from
+the fused list gains recall, while blending graph scores into it loses more than
+having no graph at all (SPRIG's ablation, reproduced here). Two properties keep
+the lane safe to leave on — a corpus with no edges gets exactly the fused
+ranking back, and a document retrieval already found is never dropped to make
+room for a neighbour.
+
+Measured against a plain BM25 baseline over the same corpus — 200 HotpotQA
+questions, 1,991 paragraphs, recall@10, paired over the same questions:
+
+| | recall | MRR | p50 |
+|---|---|---|---|
+| BM25 alone | 0.90 | 0.87 | 4 ms |
+| llmwiki, graph lane off | 0.90 | 0.89 | 15 ms |
+| **llmwiki, no API call** | **0.96** | 0.88 | 15 ms |
+| **llmwiki + embeddings** | **0.99** | **0.93** | 581 ms |
+
+`+0.07` and `+0.09` against the baseline, 95% CI `[+0.04, +0.09]` and
+`[+0.06, +0.12]`. On a hand-written 78-document corpus the same comparison is
+0.90 → 1.00 at k=5. The trade in the last two rows is the point: the graph lane
+gets most of the gain with no network call, and embeddings buy the rest at
+40× the latency.
+
+Reproducible with the `ragharness` evaluation harness — method, ablations, the
+constants that were tuned and what did *not* work in
+[future_work/retrieval-rebuild/](future_work/retrieval-rebuild/README.md).
 
 ```bash
 llmwiki ask "How do the two chemistries compare?" -p ~/wikis/energy
@@ -234,19 +263,27 @@ export LLMWIKI_MODEL=qwen3:8b
 
 ## Vector search (optional)
 
-Off by default; keyword + graph retrieval needs no API calls and no
-dependencies. To enable it:
+Off by default; BM25 + graph retrieval needs no API calls and no dependencies.
+To enable it:
 
 ```bash
 export LLMWIKI_EMBEDDING_MODEL=text-embedding-3-small
-llmwiki embed
+llmwiki embed                       # wiki pages *and* raw sources
 ```
 
 Chunk vectors live in a single SQLite file (`.llm-wiki/vectors.db`), scored by
 brute-force cosine similarity — fast enough at personal scale, and portable.
 New pages are embedded automatically as they're ingested. If the embedding
-endpoint is unreachable at query time, retrieval degrades to keyword + graph
-rather than failing.
+endpoint is unreachable at query time, retrieval degrades to BM25 + graph rather
+than failing.
+
+**Embed the whole corpus, not part of it.** `embed` covers raw sources as well
+as pages, and `--no-sources` opts out at a real cost: fusion adds a reciprocal
+for every document the vector lane ranked, so a lane covering only part of the
+corpus pushes everything it *cannot* rank below everything it can. Measured, that
+was recall@5 dropping from 1.00 to 0.79 the moment a pages-only vector index was
+switched on. Retrieval warns when the index covers fewer documents than the
+corpus.
 
 ## Templates
 
@@ -294,8 +331,8 @@ for citation in answer.citations:
 
 Kept: the three-layer architecture, two-step chain-of-thought ingest, the
 `---FILE:---` protocol and its parser hazards, path sandboxing, SHA256
-caching, deterministic index/log maintenance, keyword scoring weights, RRF
-fusion, graph expansion and the 4-signal relevance model, and the character
+caching, deterministic index/log maintenance, RRF fusion, the wikilink graph
+and its 4-signal relevance model, and the character
 budget allocator.
 
 Changed:

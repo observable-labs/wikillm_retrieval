@@ -371,6 +371,15 @@ invalidation call anywhere.
 Recorded because a tuned constant with no record of its evidence is a guess with
 a decimal point.
 
+> **Every row above the rule was fitted on one *class* of question.** atlas and
+> HotpotQA are both entity-anchored: the query names the thing it is asking
+> about, and the gold document's title is usually a substring of it. A constant
+> tuned on one question class and applied to another is the same error as a
+> constant tuned on one corpus, which is the caveat `MENTION_SCALE` already
+> carries below — and it is a larger error, because there was no second question
+> class to notice it against until `fixtures/atlas/thematic` existed. The rows
+> below the rule are the ones fitted with that class in the room.
+
 | Constant | Value | Tuned on | Shape of the optimum |
 |---|---|---|---|
 | `MENTION_SCALE` | 0.05 | atlas, 44 questions | flat 0.02–0.05; past 0.25 recall is traded for rank |
@@ -382,6 +391,11 @@ a decimal point.
 | `DEFAULT_SELF_WEIGHT` | 1.0 | atlas + HotpotQA jointly | recall peaks at 1.0, MRR at 2–3; recall is the primary metric so 1.0 wins by 0.02 recall@5 against 0.02 MRR |
 | `DEFAULT_TAIL_WEIGHT` | 0.0 | atlas + HotpotQA jointly | 0 is best on recall on both (0.965 vs 0.958 on HotpotQA); MRR flat across 0–1 |
 | `DEFAULT_ALPHA` | 0.15 | SPRIG, unchanged | |
+| — | — | — | — |
+| `ABSTAIN_QUANTILE` | 0.05 | atlas + atlas-thematic jointly | **new — see §10.** p05 gates every one of the 62 keyword-hostile questions and costs nothing at all on the 44 regular ones; p10 gates 41% of the regular ones for the same gain; p25 costs 0.02 recall at k=1 and k=3. Set where it is free |
+| `CALIBRATION_SAMPLE` | 400 titles | latency only | 14 ms over 78 titles, 152 ms over 400 on 1,991 documents, once per index build. Not a quality parameter — the fence is a percentile and moves by under 3% between 100 and 400 samples |
+| `graph_gate` | on | atlas + atlas-thematic jointly | **new — see §10.** +0.04 recall at k=3, 5, 10 and 20 on the hostile suite; −0.02 at k=5 on atlas, in a column where the harness itself reports 2% of the usable scale left above the leader |
+| `lexical_weight` / `vector_weight` | 1.0 | not tuned; a profile's instrument | on atlas, monotone downward — 0.75 costs 0.01 at k=5, 0.5 costs 0.02 at k=1, 0.1 costs 0.03. Which is what an entity-anchored suite *should* say, and is why this is a profile rather than a default |
 
 Two of these were checked against HotpotQA, which no tuning touched, to make
 sure an atlas-tuned constant was not quietly deciding the external result.
@@ -673,4 +687,153 @@ depth moves nothing. Calibrating per lane would need labelled data, and the only
 labelled data here is the eval. The shortfall is declared rather than tuned away,
 and `compare` now prints it and exits non-zero without anyone having to notice.
 
+> **This is where §10 starts, and the last sentence of that paragraph is the
+> part that was wrong.** Calibrating *across* lanes needs labels. Calibrating a
+> lane against *itself* on the same corpus needs none, and the reference data
+> was sitting in the index the whole time.
+
 ---
+
+---
+
+## 10. Fusing a lane that found nothing
+
+Compiled 2026-08-28, after
+[`research/evaluation/roadmaps/representative-questions.md`](../../research/evaluation/roadmaps/representative-questions.md).
+Everything above this section was measured on questions that name the thing they
+are asking about — atlas and HotpotQA both — and §9 closed the last defect
+visible from inside that class. This one was not.
+
+### 10.1 The measurement that made it visible
+
+Sixty-two questions over the same 78 atlas documents and the same facts, phrased
+without any of the corpus's own vocabulary and checked at build time to be sure:
+
+```
+  atlas-thematic · 62 questions · 78 documents · recall@k
+
+  system                          R@1    R@3    R@5   R@10   R@20   local
+  ──────────────────────────────────────────────────────────────────────
+  dense                          0.15   0.39   0.52   0.66   0.80       1
+  llmwiki/full  (before)         0.03   0.20   0.33   0.45   0.64      16
+  bm25                           0.01   0.02   0.02   0.02   0.09       0
+```
+
+bm25 goes from 0.95 on the regular atlas questions to 0.02 on these. That is the
+finding the roadmap is about and it is not this document's subject. The row that
+is: **the assembled system scored 0.21 below its own vector lane at k=10.**
+Equal-weight RRF was fusing a ranking worth 0.02 with a ranking worth 0.66 and
+landing between them, which is exactly what equal-weight RRF is for and exactly
+wrong here.
+
+### 10.2 The signal was already computed
+
+The lexical lane's own top BM25 score. On atlas, questions that use the corpus's
+words score a median 7.99; questions that avoid them score a median 2.20. The
+distributions barely touch.
+
+A raw BM25 score does not transfer between corpora — it depends on term
+distribution, document lengths and column weights — so the threshold has to be a
+percentile of *this corpus's* distribution. The reference data needs no labels
+and no traffic: **run each of a sample of document titles as a query and record
+what the lexical lane scores.** A title is the cheapest available example of a
+query that genuinely names something in the corpus. 14 ms over 78 titles, 152 ms
+over 400 on 1,991 documents, once per index build, invalidated by the same
+corpus fingerprint that invalidates the index.
+
+`retrieval/calibration.py`. The fence is the 5th percentile; a query below it
+abstains rather than voting, and only when there is another lane to fall back on
+— a ranking from a weak lane still beats no ranking at all.
+
+| corpus | fence | questions gated |
+|---|---|---|
+| atlas, keyword-hostile | 6.17 | 62 of 62 |
+| atlas, regular | 6.17 | 12 of 44 |
+| MuSiQue | 16.74 | 28 of 485 |
+| HotpotQA | 14.87 | 1 of 200 |
+
+Four question sets, ordered exactly as their phrasing predicts, from one rule
+with no per-corpus constant in it.
+
+### 10.3 What it bought, and what it cost
+
+```
+  atlas-thematic · recall@k
+
+  system                          R@1    R@3    R@5   R@10   R@20   local
+  ──────────────────────────────────────────────────────────────────────
+  llmwiki/full  (gated)          0.15   0.39   0.52   0.66   0.80       2
+  llmwiki/full  (lexical only)   0.15   0.35   0.48   0.62   0.76      16
+  llmwiki/full  (before)         0.03   0.20   0.33   0.45   0.64      16
+```
+
+The lexical gate is worth +0.12 to +0.17; gating the graph lane on the same
+signal — diffusing from a fused list with no lexical evidence in it is diffusing
+from noise — adds +0.04 at every `k` above 1. `full` now equals `dense` to two
+decimal places at every `k`, and `compare` reports no monotonicity violation on
+that suite where it previously reported twelve.
+
+**It costs nothing on the entity-anchored corpora.** atlas is unchanged at every
+`k` except a 0.02 at k=5 that belongs to the *graph* gate, in a column the
+harness itself flags as having 2% of the usable scale left. MuSiQue gains 0.01 at
+k=1 and k=3. HotpotQA gains 0.01 at k=3. That is the whole of P6 and it is why
+the fence sits at the 5th percentile rather than the 10th: p10 gates 41% of
+atlas's regular questions for no additional gain.
+
+**Latency, measured on the queries the gate fires on** — a p50 over a suite
+where 6% of queries gate is drawn from the 94% where nothing changed, so the
+per-suite number cannot show this:
+
+| corpus | documents | graph skipped | graph run | saved |
+|---|---|---|---|---|
+| MuSiQue | 5,918 | 7 ms | 144 ms | **137 ms** |
+| atlas | 78 | 1 ms | 10 ms | 8 ms |
+
+### 10.4 Profiles, and the part a gate cannot do
+
+A gate is the right instrument when a lane has *no* handhold. It does nothing for
+a query with a weak one, and after the gate the hybrid was still below `dense` at
+every `k` on MuSiQue — by 0.003 to 0.03, small, consistent, and reported every
+time by the monotonicity check.
+
+`retrieval/profiles.py` adds the continuous form: `abstain_quantile`, where the
+fence sits, and `lexical_weight`, what the lane's vote is worth when it clears
+it. Four profiles — `voice`, `balanced`, `deep`, `research` — over both the depth
+axis build-plan step 9 specified and the lane-trust axis it did not.
+
+```
+  musique · 485 questions · recall@k
+
+  system                       R@1    R@3    R@5   R@10   R@20   local
+  ────────────────────────────────────────────────────────────────────
+  llmwiki/hybrid/research     0.34   0.60   0.68   0.76   0.82     227
+  llmwiki/hybrid  (balanced)  0.33   0.57   0.66   0.74   0.82     288
+  dense                       0.33   0.60   0.68   0.75   0.82       3
+  bm25                        0.26   0.39   0.44   0.51   0.57      15
+```
+
+`research` is at or above `dense` at every `k` — the two remaining shortfalls are
+0.003 and 0.0002 — where `balanced` was below it at every `k`. It is not the
+default and should not be: on atlas it scores `0.74 / 0.88 / 0.94 / 1.00` against
+`balanced`'s `0.76 / 0.92 / 0.96 / 1.00`. Which lane to trust is a property of the
+question class, and the caller knows the class in a way the ranker does not.
+
+### 10.5 What this does not show
+
+A judge comparing the gated configuration against the pre-gate one on 24
+corpus-level questions — *"what are the main themes here"*, no gold set, scored
+by pairwise win rate with the presentation order swapped — finds **no difference
+on either comprehensiveness or grounding**. Both intervals span 0.5.
+
+Against bm25 on the same questions the assembled system wins on comprehensiveness
+(0.79, interval [0.52, 0.92]) and ties on grounding. Against `dense`, where the
+gate makes the two retrievals identical, the judge correctly returns a tie — which
+is the only evidence available that it is reading the answers rather than the
+layout.
+
+At n=24 the interval cannot rule out a real gain from the gate. What it does rule
+out is quoting 0.21 recall as though it were a claim about the answers a person
+reads. On a 78-document corpus almost any ten pages support a plausible answer to
+a thematic question, and a large improvement in *which* ten may simply not reach
+the reader. Running that comparison at a larger n on a larger corpus is one
+command and is the most valuable measurement not yet taken.

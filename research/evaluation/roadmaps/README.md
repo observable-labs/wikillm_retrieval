@@ -12,7 +12,7 @@ implementation.
 |---|---|---|
 | [harness-self-validation.md](harness-self-validation.md) | The harness measures the right things. Why did its first adversarial run report numbers that did not mean what their labels said? | implemented; §4.1 and §10 record what each step became |
 | [discriminating-power.md](discriminating-power.md) | The labels are now honest. Why does the resulting headline table still not support the conclusion drawn from it? | implemented; §4.2 records what each step became, §6.1 the acceptance results, §11 where the proposal was wrong |
-| [representative-questions.md](representative-questions.md) | The numbers now separate the systems. Why do they separate them on a question class the product barely serves? | the fixture is built and committed; E15–E21 and R1–R3 proposed |
+| [representative-questions.md](representative-questions.md) | The numbers now separate the systems. Why do they separate them on a question class the product barely serves? | implemented; §4 and §4.1 record what each step became, §6 the acceptance results, §10 where the proposal was wrong |
 
 They are one progression, and the numbering is continuous because the defects
 are:
@@ -22,7 +22,7 @@ are:
 | [`../harness-v1.md`](../harness-v1.md) | what should be measured | gaps 1–10 | built |
 | harness-self-validation.md | did the measurement run | D1–D5 | E1–E7, built |
 | discriminating-power.md | could the measurement have separated anything | D6–D10 | E8–E14, built |
-| representative-questions.md | were the questions the work | D11–D15 | E15–E21 + R1–R3, proposed |
+| representative-questions.md | were the questions the work | D11–D15 | E15–E19 + R1–R3, built |
 
 Each one is only visible once the one above it is closed. The second could not
 be seen until runs stopped being mislabelled; the third could not be seen until
@@ -40,7 +40,24 @@ previous three are all defects a check inside the tool can detect, and *"these
 questions do not resemble the work"* is not. It took a person looking at a
 headline and finding it implausible — the observation that a keyword retriever
 should not score 0.95 on questions a research assistant would be asked. Asked
-without the corpus's vocabulary, on the same 78 documents, bm25 scores 0.10.
+without the corpus's vocabulary, on the same 78 documents, bm25 scores **0.02**.
+
+Closing it moved the largest number in the series so far. The shipped
+configuration went from 0.45 to 0.66 `recall@10` on that question class — level
+with its own vector lane, where it had been 0.21 below — because a lexical lane
+that has found nothing now abstains instead of voting. And the fourth document
+found the same thing a level down twice over: the fixture's defining property
+had been verified by a second copy of the measure that defines it, and
+`ask()` had never taken the caller's retrieval configuration at all, so every
+generation comparison between two lanes had been comparing one retriever with
+itself.
+
+Which leaves the fifth question already visible in the fourth's own results. R1
+is worth 0.21 recall on the question class the product exists for, and a judge
+comparing the same two configurations on corpus-level questions shows **no
+difference at all**. Either the judge or the corpus is too small to see it, or
+retrieval recall is not what decides whether an answer is good — and nothing in
+four roadmaps of retrieval measurement can tell those apart.
 
 What the closed harness then measured — and the retrieval rebuild it made
 possible — is in

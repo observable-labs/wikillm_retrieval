@@ -24,14 +24,24 @@ and what closes *that* class?
 > because they are the measurement that motivated the work and rewriting them
 > would erase it.
 
-> **Superseded in one respect, 2026-08-28.** Everything here holds, and
-> [representative-questions.md](representative-questions.md) shows that the
-> headline it produces — `+0.19 over bm25` — is an average over a question set
-> that is 98% entity-anchored, on which bm25 scores 0.90 and on which it is being
-> handed its own answer. Asked without the corpus's vocabulary, bm25 scores 0.10
-> and the shipped configuration loses to its own dense lane by 0.13. This
-> document made the numbers separable; the next one asks whether they were about
-> the right thing.
+> **Superseded in one respect, 2026-08-28.** Everything here holds. What it
+> does not say is what its numbers are averages *over*, and
+> [representative-questions.md](representative-questions.md) is the answer:
+> `+0.19 over bm25` is a mean over a question set that is 98% entity-anchored,
+> where the gold document's title is usually a substring of the query and bm25
+> is being handed its own answer.
+>
+> Read with the class attached, the headline is **`+0.19 recall@5 on hotpot-1k,
+> 1,000 entity-anchored multi-hop questions`** — which is the convention that
+> document proposes and this one is the argument for. On 62 questions over the
+> same atlas corpus phrased *without* its vocabulary, bm25 scores **0.02** at
+> k=10 and the configuration that shipped when this document was written scored
+> 0.45 against its own dense lane's 0.66. That gap is now closed (a lexical lane
+> that abstains when it has found nothing), and the two documents together are
+> the argument for reporting the class beside the `k` rather than either alone.
+>
+> This document made the numbers separable; the next one asks whether they were
+> about the right thing.
 
 **Where the work lands:** as with the previous roadmap, this document lives in
 `wikillm_retrieval/research/` and almost every step changes

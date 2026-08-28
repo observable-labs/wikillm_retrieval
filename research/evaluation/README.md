@@ -116,12 +116,18 @@ capability, scored on whether the right page came back.**
 Four tags, one per capability in the brief, so a gain in one cannot mask a
 regression in another:
 
-> **This mix was designed and never built.** The suites that exist are 98%
-> `multi-hop` and 0.5% `thematic` — the public benchmarks were available and
-> hand-written thematic questions were not, so the cheap half got built. On
-> questions asked *without* the corpus's vocabulary, bm25 falls from 0.95
-> recall@10 to 0.10 and the shipped configuration loses to its own dense lane.
-> See [roadmaps/representative-questions.md](roadmaps/representative-questions.md).
+> **This mix was designed, not built, and has since been built.** The suites
+> that existed were 98% `multi-hop` and 0.5% `thematic` — the public benchmarks
+> were available and hand-written thematic questions were not, so the cheap half
+> got built. On questions asked *without* the corpus's vocabulary, bm25 falls
+> from 0.95 `recall@10` to 0.02, and the configuration that shipped before this
+> was measured lost 0.21 to its own dense lane on the same questions.
+>
+> Two suites now cover the gap: `fixtures/atlas/thematic`, 62 questions whose
+> vocabulary avoids the corpus's by construction and is checked to at build
+> time, and `fixtures/atlas/global`, 24 corpus-level questions with no answer
+> key at all, scored by pairwise judgement. See
+> [roadmaps/representative-questions.md](roadmaps/representative-questions.md).
 
 | Tag | Tests | Count |
 |---|---|---|
@@ -236,10 +242,20 @@ than becoming one.
 | Don't | Why |
 |---|---|
 | Start with RAGAS / ARES / RAGChecker | an LLM judge per question per metric, added to a system whose defining property is a fast local path. RAGChecker later, when a regression resists retrieval-metric explanation |
+| Generate the whole question set with an LLM | AutoQ gives questions, not gold pages — so no recall, and the questions inherit the generator's idea of what is answerable |
 | Start with a public benchmark | measures machinery, not fitness; and you cannot debug a corpus you did not write questions for |
 | Score a single aggregate number | hides exactly the per-capability trade this architecture exists to manage (§1) |
-| Generate the whole question set with an LLM | AutoQ gives questions, not gold pages — so no recall, and the questions inherit the generator's idea of what is answerable |
 | Defer the eval until after the optimizations | steps 5, 8, 11 and 12 of the build plan each claim a measurable gain; without a baseline they are faith |
+
+> **The first row is scoped to the regression suite, and was inherited too far.**
+> A judge is the wrong instrument where a gold set exists: it costs money, it
+> adds variance, and it answers less precisely than `recall@k` does. It is the
+> *only* instrument where a gold set cannot exist — *"what are the themes of
+> this corpus"* has no answer key, which is what makes it the real research
+> question and why every suite here avoided it for four roadmaps. `ragharness
+> judge` scores that tier and only that tier: on demand, never per commit,
+> pairwise against a named comparator, with the presentation order swapped so
+> the number is about the answers rather than about the layout.
 
 ---
 

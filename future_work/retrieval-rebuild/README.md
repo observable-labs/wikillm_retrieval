@@ -407,7 +407,8 @@ unaffected by it.
 > **Superseded in part, 2026-08-28.** This section's first finding was measured
 > while `group_by_page` was ranking atlas's raw sources above everything on every
 > query. With that fixed the dense lane on atlas scores 0.705 recall@1 rather
-> than 0.023, and `full` beats both of its lanes at every k. The templated-corpus
+> than 0.023, and `full` beats `dense` at every k — though the vector lane is
+> still mildly negative against `sources` at k=3 and k=5. The templated-corpus
 > effect below is real and was not the whole of it — §9 has the correction, and
 > the moral the section draws is if anything stronger than it was.
 
@@ -663,7 +664,8 @@ from too.
 `dense` baseline at k ≤ 5 — 0.73 against 0.86 at k=2 — and above it at k ≥ 10.
 That corpus's lexical lane is 0.60 at k=2 against the vector lane's 0.86, and
 equal-weight RRF lands almost exactly between them, which is what equal-weight
-RRF is for. On atlas the hybrid beats both of its lanes at every k. Two repairs
+RRF is for. On atlas fusion is additive at k=2 and slightly negative at k=5,
+where the lexical lane alone reaches 0.955 against the fused 0.932. Two repairs
 were measured and both were worse: weighting the lanes by their own score margin
 fails because BM25 margins (0.5–0.7) and cosine margins (0.1–0.25) are not
 comparable, and treating an unranked document as ranked one past the lane's

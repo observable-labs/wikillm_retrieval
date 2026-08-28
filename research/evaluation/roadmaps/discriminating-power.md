@@ -460,10 +460,11 @@ same commit of the suite and with every change measured on both corpora:
 ```
 
 Compare that with §1's first table, which is the same measurement before any of
-this: the graph lane's contribution was `−0.01, −0.03, +0.01, +0.07, +0.04`
-across the same five k. It is now `+0.00, +0.00, +0.02, +0.05, +0.03` — never
-negative, and the whole system's advantage over bm25 separates at every k rather
-than at one. The mechanism that fixed it is in §4.2: PPR now seeds from the
+this. Read as the ablation rather than against the baseline — `lexical` minus
+`lexical/no-graph`, which is what "the graph lane's contribution" has to mean —
+it was `−0.01, −0.04, +0.02, +0.06, +0.03` across the same five k. It is now
+`+0.00, +0.00, +0.02, +0.05, +0.03`: never negative. And the whole system's
+advantage over bm25 separates at every k rather than at one. The mechanism that fixed it is in §4.2: PPR now seeds from the
 window it was asked for rather than from a fixed five, so a diffusion driven by
 four documents that will not be shown no longer decides the one that is.
 
@@ -505,7 +506,8 @@ any k on this corpus.
 
 **P2 — the whole beats its strongest part. Fails on HotpotQA, holds on atlas,
 and is declared.** `hybrid` scores below `dense` at k ≤ 5 on HotpotQA and above
-it at k ≥ 10; on atlas it beats both of its lanes everywhere. §7 has the
+it at k ≥ 10, and on MuSiQue it trails by 0.05 at k=2 and catches it at k=20.
+On atlas fusion is additive at k=2 and slightly negative at k=5. §7 has the
 measurement and the two repairs that were tried and were worse. The important
 part is that the failure is *visible*: E10 put the baselines into the subset
 lattice, so `compare` prints it and exits 1 without anyone having to notice.
@@ -520,9 +522,11 @@ the rest from an embedding provider that the baseline it is being compared
 against rents from too.
 
 The prediction's failure clause named the wrong suspect, which is worth
-recording. It said that if the local term grew with corpus size, PPR would not
-be converging in its iteration budget. The local term *does* grow with corpus
-size — 12 ms on 2,000 documents against 76 ms with the vector lane on the same
+recording — and then a second measurement showed the graph lane *does* have a
+cost problem, just not the one P3 described or the one the vector scan
+explains (§7). It said that if the local term grew with corpus size, PPR would
+not be converging in its iteration budget. The local term *does* grow with
+corpus size — 12 ms on 2,000 documents against 76 ms with the vector lane on the same
 corpus, and 269 ms a query on 9,931 chunks — and PPR has nothing to do with it.
 It is `VectorStore.search` scanning every chunk in pure Python. Two of the four
 llmwiki changes in §4.2 are about that, and after them the scan is 5.6 ms a
@@ -660,6 +664,7 @@ before any of it was run.
 | RRF fusion scores below its own dense lane at every unsaturated k | `retrieval/pipeline.py:_fuse` | **partly, and mostly not the cause** — see below |
 | `RRF_K = 60` is TREC's constant, tuned on 1,000-result lists, applied to lists of 20–50 | `retrieval/graph.py:RRF_K` | **closed** — swept, now 3 |
 | The graph lane's contribution changes sign with `k` | `retrieval/ppr.py` | **closed** — seeds now follow the window |
+| Diffusion cost is set by the seeds' connected component, not by the corpus | `retrieval/ppr.py` | **open, and measured** — see below |
 | A page's vector rank depended on how deep the chunk scan went | `embeddings.group_by_page` | **closed** — not predicted here at all |
 
 **On the first, and this is the part worth reading.** The hypothesis was RRF
@@ -705,13 +710,45 @@ below a baseline built from one of its own lanes — and the explanation reasone
 out from the shipped constants was the wrong one. §10 called the attribution
 thin ice, and it was.
 
+**On diffusion's cost, which is not where anyone was looking.** The graph lane
+costs 4.2 ms a query on hotpot-1k (9,769 documents) and **63.8 ms on MuSiQue
+(5,918 documents)** — fifteen times more on a corpus 40% smaller. Three
+explanations were ruled out by measurement before the right one:
+
+| | graph nodes | edges | nodes/doc | edges/node | reached per query | iterations | marginal |
+|---|---|---|---|---|---|---|---|
+| hotpot-1k | 19,364 | 27,372 | 1.98 | 1.4 | 179 (0.9%) | 50.4 | 4.2 ms |
+| musique | 11,742 | 15,954 | 1.98 | 1.4 | **2,340 (19.9%)** | 53.9 | **63.8 ms** |
+
+Not corpus size — the expensive corpus is smaller. Not graph density — the two
+are identical to two decimal places, and the cheap corpus has more nodes and
+more edges. Not the iteration budget, which P3's failure clause named and which
+differs by 7%. It is the **size of the connected component the seeds land in**:
+thirteen times the frontier at the same iteration count, and diffusion cost is
+iterations × frontier.
+
+HotpotQA's pooled distractors are paragraphs that mostly share no entities, so
+they form small islands and a seed reaches 0.9% of the graph. MuSiQue's are
+paragraphs about interlinked real-world entities, so a seed reaches a fifth of
+it. **The consequence is that 4 ms is the unrepresentative number.** A personal
+wiki is a single large connected component by construction — that is what a wiki
+is — so it will behave like MuSiQue. Both corpora also spend nearly the whole
+60-iteration budget rather than converging early to the 1e-8 tolerance, so
+`DEFAULT_ITERATIONS` is the first lever and has never been swept.
+
 **What remains open.** After all four changes the hybrid still scores below the
 dense lane on HotpotQA at k ≤ 5 (0.73 against 0.86 at k=2), and beats it at
 k ≥ 10. The lexical lane on that corpus is 0.60 at k=2 against the vector lane's
 0.86, and equal-weight RRF lands almost exactly between them, which is what
 equal-weight RRF is for. On atlas — the corpus shaped like the one this system
-is for — the hybrid beats **both** of its lanes at every k, which is the claim
-hybrid retrieval exists to make.
+is for — fusion is additive at k=2, beating the lexical lane's 0.864 and the
+vector lane's 0.818 with 0.875. It is **not** additive at k=5, where the lexical
+lane alone reaches 0.955 against the fused 0.932, and through the harness the
+same thing shows as `sources` scoring 1.00 at k=5 against `full`'s 0.98. An
+earlier draft of this section claimed the hybrid beat both of its lanes at every
+k on atlas; that was wrong, and the corpus's templated pages are why (§9.2).
+What atlas shows unambiguously is that the graph lane is the entire margin over
+bm25, and that `full` beats `dense` at every k.
 
 Two repairs were measured and both were worse. Weighting the lanes by their own
 score margin fails because the margins are not comparable across lanes: BM25
@@ -787,7 +824,9 @@ defending turned out to be mostly an artifact. "The dense lane does not help on
 atlas — and that was the fixture, not the lane" was measured while
 `group_by_page` was ranking atlas's raw sources above everything on every query
 (§7). With that fixed the dense lane on atlas is 0.705 recall@1 rather than
-0.023, and `full` beats both of its lanes at every k. The templated-corpus
+0.023, and `full` beats `dense` at every k. The vector lane is still
+mildly negative against `sources` at k=3 and k=5, which is the residue of the
+same effect. The templated-corpus
 effect is real and was not the whole of it.
 
 **9.3 `evaluation/README.md` §1 still describes an artifact that does not

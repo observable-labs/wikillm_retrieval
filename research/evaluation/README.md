@@ -25,6 +25,9 @@ Contents:
   the numbers mean what they say and are still reported at a `k` where nothing
   could have separated the systems — implemented, and its §7 is where four
   retrieval defects that only a `k` sweep could see are recorded.
+  [representative-questions.md](roadmaps/representative-questions.md): the
+  numbers now separate the systems, on a question class the product barely
+  serves — the fixture that shows it is built, the steps are proposed.
 
 **Status, 2026-08-28.** Tier 0 and Tier 1 below are both built and run: a
 generated 78-document corpus with 44 questions, and 200 HotpotQA questions over
@@ -112,6 +115,13 @@ capability, scored on whether the right page came back.**
 
 Four tags, one per capability in the brief, so a gain in one cannot mask a
 regression in another:
+
+> **This mix was designed and never built.** The suites that exist are 98%
+> `multi-hop` and 0.5% `thematic` — the public benchmarks were available and
+> hand-written thematic questions were not, so the cheap half got built. On
+> questions asked *without* the corpus's vocabulary, bm25 falls from 0.95
+> recall@10 to 0.10 and the shipped configuration loses to its own dense lane.
+> See [roadmaps/representative-questions.md](roadmaps/representative-questions.md).
 
 | Tag | Tests | Count |
 |---|---|---|

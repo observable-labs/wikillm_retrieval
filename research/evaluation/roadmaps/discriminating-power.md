@@ -24,6 +24,15 @@ and what closes *that* class?
 > because they are the measurement that motivated the work and rewriting them
 > would erase it.
 
+> **Superseded in one respect, 2026-08-28.** Everything here holds, and
+> [representative-questions.md](representative-questions.md) shows that the
+> headline it produces — `+0.19 over bm25` — is an average over a question set
+> that is 98% entity-anchored, on which bm25 scores 0.90 and on which it is being
+> handed its own answer. Asked without the corpus's vocabulary, bm25 scores 0.10
+> and the shipped configuration loses to its own dense lane by 0.13. This
+> document made the numbers separable; the next one asks whether they were about
+> the right thing.
+
 **Where the work lands:** as with the previous roadmap, this document lives in
 `wikillm_retrieval/research/` and almost every step changes
 `space_brief/evaluation/ragharness`, a different repository. §7 lists the parts

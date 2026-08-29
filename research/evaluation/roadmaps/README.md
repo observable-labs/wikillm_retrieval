@@ -13,6 +13,7 @@ implementation.
 | [harness-self-validation.md](harness-self-validation.md) | The harness measures the right things. Why did its first adversarial run report numbers that did not mean what their labels said? | implemented; §4.1 and §10 record what each step became |
 | [discriminating-power.md](discriminating-power.md) | The labels are now honest. Why does the resulting headline table still not support the conclusion drawn from it? | implemented; §4.2 records what each step became, §6.1 the acceptance results, §11 where the proposal was wrong |
 | [representative-questions.md](representative-questions.md) | The numbers now separate the systems. Why do they separate them on a question class the product barely serves? | implemented; §4 and §4.1 record what each step became, §6 the acceptance results, §10 where the proposal was wrong |
+| [instrument-coverage.md](instrument-coverage.md) | The questions are now the work. Can this harness see the system that is about to be built? | implemented; §9 records what each step became, §10 the acceptance results, §11 where the proposal was wrong |
 
 They are one progression, and the numbering is continuous because the defects
 are:
@@ -23,11 +24,35 @@ are:
 | harness-self-validation.md | did the measurement run | D1–D5 | E1–E7, built |
 | discriminating-power.md | could the measurement have separated anything | D6–D10 | E8–E14, built |
 | representative-questions.md | were the questions the work | D11–D15 | E15–E19 + R1–R3, built |
+| *(ragharness work items)* | is any of it read against a scale that exists | D16–D34 | E20–E45, proposed |
+| instrument-coverage.md | can it see what is about to be built | D35–D39 | E46–E56 + E21, built |
 
 Each one is only visible once the one above it is closed. The second could not
 be seen until runs stopped being mislabelled; the third could not be seen until
 the numbers meant what they said, at which point the remaining question was
 whether they meant anything.
+
+**The last row breaks the pattern deliberately.** The first five are
+retrospective — each asks something about a harness that has already run, and
+each is settled by looking at what it produced. `instrument-coverage` is
+prospective: it asks whether an instrument exists for a capability nobody has
+built, which cannot be settled by looking at a run. Its one *observed* defect
+(D35) is the anchor; the rest are absences, and its §0 says what that costs.
+
+Building it converted four of those absences into measurements on the first run,
+and the two that matter most point in opposite directions. A spoken follow-up
+costs **0.63 recall** against the oracle rewrite on this corpus — the largest
+single gap the series has measured, and it justifies a step the roadmap was
+prepared to retire. And the shipped configuration returns the right document on
+every intra-document question while pointing at the wrong *section* of it every
+time, scoring **0.00 passage recall against the dense baseline's 1.00** — the
+same defect D35 named, now with a number and a system that already beats it.
+
+Which is the pattern holding rather than breaking: a prospective document's
+value is not that its predictions were right. Two of them were wrong in the
+first hour of building — the passage id space cannot be a chunk id, and the
+token counts it called "already recorded" were recorded as zeros — and its §11
+says so.
 
 The third one's own findings said the same thing a level down. Sweeping `k`
 turned up four defects in retrieval larger than several of the five the previous

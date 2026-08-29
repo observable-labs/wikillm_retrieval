@@ -117,7 +117,11 @@ def check_corpus_index(
             fail("keys-are-unique-strings", f"key {key!r} is not a non-empty str")
             break
 
-    missing = [d for d in documents if by_path.get(_key_of(by_path, d)) is not d]
+    # One reverse pass rather than a scan per document. The kit is meant to be run
+    # against a real store, not only a two-document fixture, and an O(n^2) check
+    # is one nobody runs twice.
+    filed_under = {id(document): key for key, document in by_path.items()}
+    missing = [document for document in documents if id(document) not in filed_under]
     if missing and len(by_path) == len(documents):
         fail(
             "by-path-covers-documents",
@@ -233,15 +237,3 @@ def assert_corpus_index(index: Any, *, name: str = "index", **kwargs: Any) -> No
         listed = "\n  - ".join(failures)
         raise AssertionError(f"{name} is not a conforming CorpusIndex:\n  - {listed}")
 
-
-def _key_of(by_path: dict, document: Any) -> str:
-    """The key `by_path` filed this document under, without assuming it is `.path`.
-
-    A corpus keyed on something other than the document's own path is exactly
-    what `DocumentNaming.key` exists for, so the kit must not re-derive the key
-    it is checking.
-    """
-    for key, value in by_path.items():
-        if value is document:
-            return key
-    return getattr(document, "path", "")

@@ -147,9 +147,21 @@ lane is on, an embedder is configured *and* enabled, the file exists) and closes
 it afterwards, so a project with no `vectors.db` still reaches `search_index`
 with `vectors=None` and still gets the same note.
 
-⚠️ `embed_query` is deliberately **not** injectable and is looked up on the
-module at call time, because at least one consumer patches it from outside the
-package to route embeddings remotely.
+**The embedder is injectable too, and must be.** ⛔⛔ The vectors in your store were
+written by *your* model; scoring them against a query embedded by this package's
+provider produces a ranking rather than an error, and the ranking is meaningless.
+
+```python
+def embed(query: str, timeout_s: float | None = None) -> list[float]: ...
+
+search_index(corpus, "…", vectors=my_searcher, embed=embed)   # no EmbeddingConfig needed
+```
+
+⚠️ When no `embed` is passed, `embed_query` is looked up on
+`llmwiki.embeddings` at call time and is **not** otherwise injectable, because at
+least one consumer patches it from outside the package to route embeddings
+remotely. That lookup now happens inside the no-embedder branch, so a consumer
+bringing its own provider does not import this package's provider stack at all.
 
 ## Index-time primitives
 

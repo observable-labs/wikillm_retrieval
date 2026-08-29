@@ -490,3 +490,66 @@ def _project_with(tmp_path):
         "# Station Keeping\n\nStation keeping holds a satellite in its slot.\n", encoding="utf-8"
     )
     return project
+
+
+# ── U7: the embedder is injectable, because a store's vectors have an owner ─
+
+def test_an_injected_embedder_replaces_the_packages_own(monkeypatch):
+    """⛔⛔ A vector searcher without a matching embedder is a silently wrong lane.
+
+    The chunks in someone else's store were embedded by their model. Scoring them against a
+    query this package embedded produces a ranking, not an error — which is why this is a test
+    and not a docstring.
+    """
+    from llmwiki import embeddings
+    from llmwiki.embeddings import ChunkHit
+
+    def explode(*args, **kwargs):  # pragma: no cover - the point is that it is not reached
+        raise AssertionError("the package's own embed_query was called")
+
+    monkeypatch.setattr(embeddings, "embed_query", explode)
+
+    calls: list[tuple[str, float | None]] = []
+
+    def embed(query, timeout_s=None):
+        calls.append((query, timeout_s))
+        return [0.0, 1.0]
+
+    vectors = StubVectors([ChunkHit("c9d0e1f2_electrolyte", 0, "", "vanadium", 0.9)], covered=3)
+    response = search_index(
+        StoredCorpus(DOCS, EDGES), "what is costly", top_k=5, vectors=vectors, embed=embed
+    )
+
+    assert calls == [("what is costly", None)]
+    assert response.lanes.vector and response.vector_hits == 1
+
+
+def test_an_injected_embedder_needs_no_embedding_config():
+    """A consumer with its own provider has no `EmbeddingConfig` to hand over."""
+    from llmwiki.embeddings import ChunkHit
+
+    vectors = StubVectors([ChunkHit("e5f6a7b8_flow-battery", 0, "", "t", 0.8)], covered=3)
+    response = search_index(
+        StoredCorpus(DOCS, EDGES),
+        "energy",
+        vectors=vectors,
+        embed=lambda query, timeout_s=None: [0.0, 1.0],
+    )
+    assert response.lanes.vector, "the lane must run on the embedder alone"
+
+
+def test_an_injected_embedder_receives_the_budgets_share_of_the_clock():
+    """The deadline still reaches it — a consumer's provider is a network hop too."""
+    from llmwiki.embeddings import ChunkHit
+    from llmwiki.retrieval.profiles import Budget
+
+    seen: list[float | None] = []
+    vectors = StubVectors([ChunkHit("e5f6a7b8_flow-battery", 0, "", "t", 0.8)], covered=3)
+    search_index(
+        StoredCorpus(DOCS, EDGES),
+        "energy",
+        vectors=vectors,
+        embed=lambda query, timeout_s=None: (seen.append(timeout_s), [0.0, 1.0])[1],
+        budget=Budget.for_ms(4000),
+    )
+    assert seen and seen[0] is not None and seen[0] > 0

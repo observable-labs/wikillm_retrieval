@@ -38,6 +38,7 @@ from .log import QueryLog, QueryRecord, open_log
 from .naming import DEFAULT_NAMING, DocumentNaming
 from .pipeline import (
     LanesRun,
+    QueryEmbedder,
     RetrievalOptions,
     SearchResponse,
     VectorSearcher,
@@ -94,6 +95,7 @@ __all__ = [
     "DocumentNaming",
     "InMemoryIndex",
     "LexicalSearcher",
+    "QueryEmbedder",
     "VectorSearcher",
     "assert_corpus_index",
     "check_corpus_index",

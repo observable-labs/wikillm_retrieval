@@ -27,6 +27,13 @@ produces byte-identical rankings across all eight profiles.
 - **`VectorSearcher`** — the vector lane takes an injected searcher instead of
   deriving `project.state_dir / "vectors.db"`. `search()` still builds the
   default, under exactly the conditions the lane used to test inline.
+- **`QueryEmbedder`** — and the model that produced those vectors is injectable
+  too, via `search_index(..., embed=...)`. ⛔ A vector searcher without a
+  matching embedder is a *silently wrong* lane: the chunks in a consumer's store
+  were embedded by their model, and scoring them against a query this package
+  embedded returns a ranking rather than an error. With `embed` supplied,
+  `embedding_config` is not needed at all. `search()` passes `embed=None` and is
+  unchanged.
 - **`LexicalSearcher`** — the lexical lane's surface, so a corpus with a
   persisted FTS5 table need not rebuild an in-memory copy of it.
 - **`DocumentNaming`** / `DEFAULT_NAMING` — the five naming conventions

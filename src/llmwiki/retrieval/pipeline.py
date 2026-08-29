@@ -101,6 +101,23 @@ class VectorSearcher(Protocol):
     def count(self) -> tuple[int, int]: ...
 
 
+@runtime_checkable
+class QueryEmbedder(Protocol):
+    """Turn a query into a vector, with this package's provider or somebody else's.
+
+    ⛔⛔ **A vector searcher without a matching embedder is a silently wrong lane.** The
+    vectors in a store were written by *some* model; scoring them against a query
+    embedded by a different one produces a ranking, not an error, and the ranking
+    is meaningless. So a consumer that indexed with its own embedder must be able
+    to query with it too — otherwise the only safe thing it can do with this
+    package's vector lane is not use it.
+
+    `timeout_s` is the budget's share, or `None` for a turn with no deadline.
+    """
+
+    def __call__(self, query: str, timeout_s: float | None = None) -> list[float]: ...
+
+
 @dataclass(frozen=True)
 class RetrievalOptions:
     """One switch per lane, and the S2 parameters.
@@ -354,6 +371,7 @@ def search_index(
     options: RetrievalOptions | None = None,
     vectors: VectorSearcher | None = None,
     embedding_config: EmbeddingConfig | None = None,
+    embed: QueryEmbedder | None = None,
     budget: "Budget | None" = None,
     deadline: Deadline | None = None,
     sink: Sink = NULL_SINK,
@@ -372,9 +390,13 @@ def search_index(
     project is.
 
     `vectors` is the vector lane's searcher, already open; this function never
-    opens or closes one. `stages` lets a caller that timed work *before*
-    retrieval — opening the index, rewriting the query — pass its own map in, so
-    the response reports one timeline instead of two.
+    opens or closes one. `embed` is the model that produced those vectors — pass
+    it whenever the store was not embedded by this package, because the two must
+    agree or the lane scores a query against a different vector space and
+    reports a ranking rather than an error. With `embed` supplied,
+    `embedding_config` is not needed at all. `stages` lets a caller that timed
+    work *before* retrieval — opening the index, rewriting the query — pass its
+    own map in, so the response reports one timeline instead of two.
 
     Keyword-only after `query` on purpose: this is new surface, and positional
     parameters are the half of a signature that cannot later be reordered.
@@ -408,7 +430,7 @@ def search_index(
     vector_score: dict[str, float] = {}
     vector_hits = 0
     query_vector: list[float] | None = None
-    if options.vector and embedding_config is not None:
+    if options.vector and (embedding_config is not None or embed is not None):
         if (
             deadline is not None
             and deadline.may_degrade
@@ -429,7 +451,7 @@ def search_index(
                 "the query embedding was skipped: the turn's budget did not "
                 "cover a round trip, so this ranking is the lexical lane's"
             )
-        elif not (embedding_config.enabled and embedding_config.model):
+        elif embed is None and not (embedding_config.enabled and embedding_config.model):
             notes.append("vector search is not configured — no embedding model")
         elif vectors is None:
             notes.append(
@@ -441,6 +463,7 @@ def search_index(
                     vectors,
                     query,
                     embedding_config,
+                    embed,
                     options.vector_depth
                     or max(limit * VECTOR_DEPTH_MULTIPLIER, MIN_VECTOR_DEPTH),
                     vector_rank,
@@ -652,7 +675,8 @@ def _lexical_lane(
 def _vector_lane(
     vectors: VectorSearcher,
     query: str,
-    embedding_config: EmbeddingConfig,
+    embedding_config: EmbeddingConfig | None,
+    embed: QueryEmbedder | None,
     depth: int,
     vector_rank: dict[str, int],
     vector_score: dict[str, float],
@@ -667,22 +691,32 @@ def _vector_lane(
     a turn that is late is late in one of them.
 
     `vectors` is owned by the caller and is neither opened nor closed here.
-    `embed_query` stays an attribute lookup on the module at call time, because
-    it is patched from outside the package by at least one consumer.
+
+    When no `embed` is supplied, `embed_query` stays an attribute lookup on the
+    module at call time — imported inside this branch and not at module scope —
+    because it is patched from outside the package by at least one consumer, and
+    because a caller bringing its own embedder must not pay for importing this
+    package's provider stack.
     """
-    from ..embeddings import embed_query, group_by_page
+    from ..embeddings import group_by_page
 
     stages = {} if stages is None else stages
+    timeout_s = None if budget_ms is None else budget_ms / 1000.0
     with _stage(stages, "embed", sink):
-        # The timeout is passed only when there is one. A turn with no deadline
-        # calls the embedder exactly as it did before deadlines existed, which
-        # keeps the shipped path — and anything that has stubbed this function —
-        # off a code path it never asked for.
-        query_vector = (
-            embed_query(query, embedding_config)
-            if budget_ms is None
-            else embed_query(query, embedding_config, budget_ms / 1000.0)
-        )
+        if embed is not None:
+            query_vector = embed(query, timeout_s)
+        else:
+            from ..embeddings import embed_query
+
+            # The timeout is passed only when there is one. A turn with no
+            # deadline calls the embedder exactly as it did before deadlines
+            # existed, which keeps the shipped path — and anything that has
+            # stubbed this function — off a code path it never asked for.
+            query_vector = (
+                embed_query(query, embedding_config)
+                if timeout_s is None
+                else embed_query(query, embedding_config, timeout_s)
+            )
     with _stage(stages, "vector", sink):
         chunk_hits = vectors.search(query_vector, max(depth * 3, 30))
         covered, _chunks = vectors.count()
@@ -851,6 +885,7 @@ __all__ = [
     "RetrievalOptions",
     "SearchResponse",
     "search",
+    "QueryEmbedder",
     "VectorSearcher",
     "search_index",
 ]

@@ -15,8 +15,27 @@ Typical use::
     settings = config.load(project.root)
     ingest_document(project, "paper.pdf", settings)
     print(ask(project, "What limits grid-scale storage?", settings).text)
+
+**The retrieval half stands alone.** `search_index` ranks any `CorpusIndex` —
+BM25, vector fusion, and seeded PPR over a link/mention graph — so a corpus this
+package never compiled can still be ranked by it::
+
+    from llmwiki import search_index
+    from llmwiki.retrieval import CorpusIndex   # implement this over your store
+
+    response = search_index(my_corpus, "what limits grid-scale storage?")
+
+See `docs/corpus-index.md`. Nothing in that path opens a file or knows what a
+project is.
 """
 
+from .chunking import (
+    Chunk,
+    ChunkingOptions,
+    SourceChunk,
+    chunk_markdown,
+    split_source_into_semantic_chunks,
+)
 from .config import EmbeddingConfig, LLMConfig, Settings
 from .errors import (
     ConfigError,
@@ -29,9 +48,9 @@ from .errors import (
 from .ingest import IngestResult, ingest_document
 from .project import Project, create, open_project
 from .query import Answer, answer_from, ask
-from .retrieval import search
+from .retrieval import CorpusIndex, DocumentNaming, search, search_index
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Answer",
@@ -53,4 +72,14 @@ __all__ = [
     "ingest_document",
     "open_project",
     "search",
+    # ── added in 0.2.0 ───────────────────────────────────────────────────
+    # The retrieval half, usable on a corpus this package did not build.
+    "Chunk",
+    "ChunkingOptions",
+    "CorpusIndex",
+    "DocumentNaming",
+    "SourceChunk",
+    "chunk_markdown",
+    "search_index",
+    "split_source_into_semantic_chunks",
 ]

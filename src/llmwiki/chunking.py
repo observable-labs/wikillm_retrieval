@@ -358,3 +358,18 @@ def split_source_into_semantic_chunks(
         )
         for index, (text, heading) in enumerate(groups)
     ]
+
+
+# The index-time half of this package's public surface. `chunk_markdown` and
+# `split_source_into_semantic_chunks` are what turn a document into the units a
+# lexical index and a vector store hold, and a second consumer that reimplements
+# them has an index whose boundaries silently disagree with this one's. Named
+# here so they are supported rather than merely importable.
+__all__ = [
+    "Chunk",
+    "ChunkingOptions",
+    "SourceChunk",
+    "chunk_markdown",
+    "split_source_into_semantic_chunks",
+    "strip_frontmatter",
+]

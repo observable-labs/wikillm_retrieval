@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from .keyword import Document
+from .naming import DEFAULT_NAMING, DocumentNaming
 from .tokenize import contains_cjk
 
 # Title / headings / body. The ratio, not the magnitude, is what matters; these
@@ -59,6 +61,21 @@ CREATE VIRTUAL TABLE lexical USING fts5(
 class LexicalHit:
     path: str
     score: float
+
+
+@runtime_checkable
+class LexicalSearcher(Protocol):
+    """What the lexical lane needs: rank these tokens, deepest first.
+
+    Extracted so that a corpus which already *has* a persisted FTS5 table can
+    hand one over instead of paying to rebuild an in-memory copy of it. The
+    scores must be higher-is-better and comparable within one call, which is
+    the only thing the abstention fence and RRF read off them.
+    """
+
+    def search(self, tokens: list[str], limit: int) -> list[LexicalHit]: ...
+
+    def close(self) -> None: ...
 
 
 def extract_headings(content: str) -> str:
@@ -93,15 +110,15 @@ class LexicalIndex:
     disagree with the documents it was built from, because it *is* them.
     """
 
-    def __init__(self, documents: list[Document]):
+    def __init__(self, documents: list[Document], naming: DocumentNaming = DEFAULT_NAMING):
         self._connection = sqlite3.connect(":memory:")
         self._connection.executescript(SCHEMA)
         self._connection.executemany(
             "INSERT INTO lexical (doc_id, title, headings, body) VALUES (?, ?, ?, ?)",
             [
                 (
-                    document.path,
-                    f"{document.title} {document.stem.replace('-', ' ')}",
+                    naming.key(document),
+                    naming.title_field(document),
                     extract_headings(document.content),
                     document.content,
                 )
@@ -158,6 +175,7 @@ __all__ = [
     "TITLE_WEIGHT",
     "LexicalHit",
     "LexicalIndex",
+    "LexicalSearcher",
     "extract_headings",
     "match_expression",
     "usable_for",

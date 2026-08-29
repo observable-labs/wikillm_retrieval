@@ -327,6 +327,54 @@ for citation in answer.citations:
     print(citation.number, citation.path)
 ```
 
+## Using the retrieval engine on your own corpus
+
+The retrieval half stands alone. `search_index` ranks **any** corpus — BM25
+over an FTS5 index, optional vector fusion by reciprocal rank, then seeded
+personalized PageRank over a link/mention graph — and it has no opinion about
+where the documents live. A directory of markdown is its default corpus, not
+its only one.
+
+```python
+from llmwiki import search_index
+from llmwiki.retrieval import build_index          # the in-memory default
+from llmwiki.retrieval.keyword import Document
+
+index = build_index([
+    Document(path="grid-storage", title="Grid Storage", content="..."),
+    Document(path="flow-battery", title="Flow Battery", content="..."),
+])
+for result in search_index(index, "what stores energy in tanks?").results:
+    print(result.score, result.path, result.snippet)
+```
+
+To rank a corpus this package did not build — a database, an object store, a
+per-tenant SQLite index — implement the `CorpusIndex` protocol over it and hand
+it to the same function. Nothing in that path opens a file:
+
+```python
+from llmwiki.retrieval import CorpusIndex, DocumentNaming, search_index
+from llmwiki.retrieval.conformance import assert_corpus_index
+
+class MyCorpus:                       # documents, graph, entities, lexical,
+    ...                               # build_seconds, by_path, adjacency,
+                                      # transitions, calibration, close
+
+assert_corpus_index(MyCorpus(store))  # the rules, before you depend on them
+search_index(MyCorpus(store), "…", vectors=my_vector_searcher)
+```
+
+If your documents are not named the way a markdown wiki names them — opaque
+ids, database keys, URLs — pass a `DocumentNaming`. The default reproduces the
+wiki conventions exactly; the usual override is one line:
+
+```python
+naming = DocumentNaming(title_field=lambda document: document.title)
+```
+
+See [`docs/corpus-index.md`](docs/corpus-index.md) for the protocol member by
+member, the conformance kit, and a worked non-wiki example.
+
 ## Differences from llm_wiki
 
 Kept: the three-layer architecture, two-step chain-of-thought ingest, the

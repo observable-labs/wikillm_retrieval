@@ -26,13 +26,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
+from typing import Protocol, runtime_checkable
 
 from ..config import EmbeddingConfig
 from ..errors import ProviderError
 from .calibration import ABSTAIN_QUANTILE
 from .entities import MAX_MENTIONS_PER_DOCUMENT, EntityIndex
 from .graph import RRF_K, WikiGraph
-from .index import MENTION_SCALE, SearchIndex, open_index
+from .index import MENTION_SCALE, CorpusIndex, InMemoryIndex, open_index
 from .keyword import Document, SearchResult, build_snippet, score_document
 from .lexical import usable_for
 from .ppr import (
@@ -79,6 +80,25 @@ MIN_VECTOR_DEPTH = 20
 # constant chosen here.
 TYPICAL_EMBED_MS = 120.0
 TYPICAL_DIFFUSE_MS = 10.0
+
+
+@runtime_checkable
+class VectorSearcher(Protocol):
+    """Nearest chunks to a query vector, and how much of the corpus is covered.
+
+    The vector lane used to derive a path — `project.state_dir / "vectors.db"` —
+    which made a library that can rank an in-memory corpus insist its vectors be
+    a file on disk. That was the last filesystem opinion in the ranking path.
+
+    Lifecycle belongs to whoever constructed it: `search_index` never opens or
+    closes a searcher it was handed. `count()` returns (documents covered,
+    chunks), and coverage below the corpus size is reported as a note because
+    fusion demotes every document the lane could not rank.
+    """
+
+    def search(self, vector: list[float], n: int) -> list["ChunkHit"]: ...
+
+    def count(self) -> tuple[int, int]: ...
 
 
 @dataclass(frozen=True)
@@ -230,7 +250,7 @@ def search(
     embedding_config: EmbeddingConfig | None = None,
     documents: list[Document] | None = None,
     options: RetrievalOptions | None = None,
-    index: SearchIndex | None = None,
+    index: CorpusIndex | None = None,
     budget: "Budget | None" = None,
     deadline: Deadline | None = None,
     sink: Sink = NULL_SINK,
@@ -248,15 +268,16 @@ def search(
     afforded falls back to the one below it and says so, because a spoken answer
     built from the lexical lane alone is worth more than a better answer nobody
     waited for; on the slow path nothing is dropped and the overrun is recorded.
+
+    This is the *project* entry point and its signature is fixed: it opens the
+    index, opens the project's vector store, and hands both to `search_index`,
+    which is the ranking ladder with no filesystem opinion at all. A caller who
+    already has a corpus should call that one directly.
     """
     if not query.strip():
         return SearchResponse(results=[], mode="keyword")
 
     options = options or RetrievalOptions()
-    if deadline is None and budget is not None:
-        deadline = Deadline(budget.stages(), path=budget.path)
-    limit = max(1, min(top_k, MAX_TOP_K))
-    depth = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
     stages: dict[str, float] = {}
     if index is None:
         with _stage(stages, "open", sink):
@@ -266,6 +287,98 @@ def search(
                 documents=documents,
                 lexical=options.lexical_bm25,
             )
+
+    # Opened here rather than inside the lane so that the lane takes an object
+    # and not a path. The conditions are exactly the ones that used to guard the
+    # `store_path` derivation, so a project with no `vectors.db` still arrives at
+    # `search_index` with `vectors=None` and still gets the same note.
+    vectors = _open_project_vectors(project, options, embedding_config)
+    try:
+        return search_index(
+            index,
+            query,
+            top_k=top_k,
+            options=options,
+            vectors=vectors,
+            embedding_config=embedding_config,
+            budget=budget,
+            deadline=deadline,
+            sink=sink,
+            stages=stages,
+        )
+    finally:
+        if vectors is not None:
+            vectors.close()
+
+
+def _open_project_vectors(project, options: RetrievalOptions, embedding_config):
+    """The project's own `VectorStore`, when the vector lane could use one.
+
+    Deliberately the same three conditions the pipeline used to test inline: the
+    lane is on, an embedder is configured *and* enabled, and the file exists.
+    The third is what `search_index` now reads as `vectors is None`, so the
+    "run 'llmwiki embed'" note fires from the same fact it always did.
+
+    Imported lazily. `llmwiki.embeddings` optionally reaches for numpy, and the
+    keyword-only install must not pay for it — nor must anything that has
+    monkey-patched the module from outside see a different import order.
+    """
+    if not (options.vector and embedding_config is not None):
+        return None
+    if not (embedding_config.enabled and embedding_config.model):
+        return None
+    if project is None:
+        return None
+    store_path = Path(project.state_dir) / "vectors.db"
+    if not store_path.exists():
+        return None
+    from ..embeddings import VectorStore
+
+    return VectorStore(store_path)
+
+
+def search_index(
+    index: CorpusIndex,
+    query: str,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+    options: RetrievalOptions | None = None,
+    vectors: VectorSearcher | None = None,
+    embedding_config: EmbeddingConfig | None = None,
+    budget: "Budget | None" = None,
+    deadline: Deadline | None = None,
+    sink: Sink = NULL_SINK,
+    stages: dict[str, float] | None = None,
+) -> SearchResponse:
+    """The ranking ladder. Knows nothing about where the corpus lives.
+
+        S1a  lexical ranking over the corpus index
+        S1b  vector search through an injected searcher      (optional)
+        S1c  reciprocal-rank fusion of the two rankings
+        S2   personalized PageRank seeded from the fused list (optional)
+
+    Every stage reads `index`, which is a `CorpusIndex` — a directory of
+    markdown built in memory, a persisted per-tenant store, anything answering
+    the protocol. Nothing here opens a file, derives a path, or knows what a
+    project is.
+
+    `vectors` is the vector lane's searcher, already open; this function never
+    opens or closes one. `stages` lets a caller that timed work *before*
+    retrieval — opening the index, rewriting the query — pass its own map in, so
+    the response reports one timeline instead of two.
+
+    Keyword-only after `query` on purpose: this is new surface, and positional
+    parameters are the half of a signature that cannot later be reordered.
+    """
+    if not query.strip():
+        return SearchResponse(results=[], mode="keyword")
+
+    options = options or RetrievalOptions()
+    if deadline is None and budget is not None:
+        deadline = Deadline(budget.stages(), path=budget.path)
+    limit = max(1, min(top_k, MAX_TOP_K))
+    depth = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
+    stages = {} if stages is None else stages
     notes: list[str] = []
     lanes = LanesRun()
 
@@ -307,14 +420,14 @@ def search(
             )
         elif not (embedding_config.enabled and embedding_config.model):
             notes.append("vector search is not configured — no embedding model")
-        elif not (Path(project.state_dir) / "vectors.db").exists():
+        elif vectors is None:
             notes.append(
                 "vector search is configured but no index exists yet — run 'llmwiki embed'"
             )
         else:
             try:
                 vector_hits, covered, query_vector = _vector_lane(
-                    project,
+                    vectors,
                     query,
                     embedding_config,
                     options.vector_depth
@@ -500,7 +613,7 @@ def search(
 # ── lanes ─────────────────────────────────────────────────────────────────
 
 def _lexical_lane(
-    index: SearchIndex,
+    index: CorpusIndex,
     query: str,
     tokens: list[str],
     query_phrase: str,
@@ -526,7 +639,7 @@ def _lexical_lane(
 
 
 def _vector_lane(
-    project,
+    vectors: VectorSearcher,
     query: str,
     embedding_config: EmbeddingConfig,
     depth: int,
@@ -541,11 +654,14 @@ def _vector_lane(
     The embedding round trip is timed apart from the scan it feeds: one is a
     provider's network and the other is a dot-product pass over local rows, and
     a turn that is late is late in one of them.
+
+    `vectors` is owned by the caller and is neither opened nor closed here.
+    `embed_query` stays an attribute lookup on the module at call time, because
+    it is patched from outside the package by at least one consumer.
     """
-    from ..embeddings import VectorStore, embed_query, group_by_page
+    from ..embeddings import embed_query, group_by_page
 
     stages = {} if stages is None else stages
-    store_path = Path(project.state_dir) / "vectors.db"
     with _stage(stages, "embed", sink):
         # The timeout is passed only when there is one. A turn with no deadline
         # calls the embedder exactly as it did before deadlines existed, which
@@ -557,9 +673,8 @@ def _vector_lane(
             else embed_query(query, embedding_config, budget_ms / 1000.0)
         )
     with _stage(stages, "vector", sink):
-        with VectorStore(store_path) as store:
-            chunk_hits = store.search(query_vector, max(depth * 3, 30))
-            covered, _chunks = store.count()
+        chunk_hits = vectors.search(query_vector, max(depth * 3, 30))
+        covered, _chunks = vectors.count()
         if not chunk_hits:
             return 0, covered, query_vector
 
@@ -573,7 +688,7 @@ def _vector_lane(
 def _fuse(
     lexical_rank: dict[str, int],
     vector_rank: dict[str, int],
-    index: SearchIndex,
+    index: CorpusIndex,
     rrf_k: float = RRF_K,
     lexical_weight: float = 1.0,
     vector_weight: float = 1.0,
@@ -606,7 +721,7 @@ def _fuse(
 
 def _materialize(
     ranked: list[tuple[str, float]],
-    index: SearchIndex,
+    index: CorpusIndex,
     seeds: set[str],
     fused: set[str],
     vector_score: dict[str, float],
@@ -725,6 +840,8 @@ __all__ = [
     "RetrievalOptions",
     "SearchResponse",
     "search",
+    "VectorSearcher",
+    "search_index",
 ]
 
 
@@ -743,7 +860,7 @@ def _looks_like_a_timeout(exc: Exception) -> bool:
 
 
 def _lexical_found_nothing(
-    index: SearchIndex, lexical_ranked: list[tuple[str, float]], options: RetrievalOptions
+    index: CorpusIndex, lexical_ranked: list[tuple[str, float]], options: RetrievalOptions
 ) -> bool:
     """Whether the lexical lane's best score is under this corpus's own fence.
 

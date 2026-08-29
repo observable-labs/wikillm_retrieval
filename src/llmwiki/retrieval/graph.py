@@ -32,6 +32,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from .keyword import Document
+from .naming import DEFAULT_NAMING, DocumentNaming
 
 DIRECT_LINK_WEIGHT = 3.0
 SHARED_SOURCE_WEIGHT = 4.0
@@ -79,14 +80,23 @@ class WikiGraph:
         return len(self.adjacency.get(path, ()))
 
 
-def build_graph(documents: list[Document]) -> WikiGraph:
-    pages = {doc.path: doc for doc in documents if doc.kind == "wiki"}
+def build_graph(
+    documents: list[Document], naming: DocumentNaming = DEFAULT_NAMING
+) -> WikiGraph:
+    """The curated-link graph, over whichever documents `naming` calls pages.
 
-    # A page is reachable by full path, wiki-relative path, stem, or title.
+    `naming` carries the three assumptions this function used to hold silently:
+    which documents are pages at all, what key they are known by, and which
+    strings a link may reach them through. Its default is the wiki convention,
+    verbatim.
+    """
+    pages = {naming.key(doc): doc for doc in documents if naming.is_page(doc)}
+
+    # A page is reachable by whichever aliases the corpus names it with; on a
+    # wiki that is full path, wiki-relative path, stem, or title.
     aliases: dict[str, str] = {}
     for path, document in pages.items():
-        wiki_relative = path[5:] if path.startswith("wiki/") else path
-        for alias in (path, wiki_relative, document.stem, document.title):
+        for alias in naming.aliases(document):
             if alias:
                 aliases[normalize_alias(alias)] = path
 

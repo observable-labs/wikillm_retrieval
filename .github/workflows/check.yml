@@ -1,0 +1,55 @@
+# The mirror. The same `check.sh`, triggered from the side that usually breaks it.
+#
+# ragharness already runs this script (EvalRAG/.github/workflows/check.yml), and
+# its own header says what it cannot do: the change that breaks the contract is
+# normally a *llmwiki* change, and a workflow in that repository is not
+# triggered by one. Its daily cron bounds the delay at a day; this file removes
+# it, because the two repositories are versioned and reviewed separately and
+# neither one's unit tests can see the seam.
+#
+# The defect that produced both files: llmwiki added a `timeout` parameter to
+# `embed_query`, ragharness patches that function from the outside, and every
+# budgeted turn raised TypeError. Both suites stayed green.
+#
+# ⛔ This runs the harness's script, not a copy of it. If what CI runs and what
+# a person runs can differ, the gate is a description of a gate.
+
+name: check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: EvalRAG/wikillm_retrieval
+
+      # The harness, checked out beside this package — the same sibling layout
+      # `check.sh` resolves through `LLMWIKI_ROOT:-$HERE/../wikillm_retrieval`.
+      - uses: actions/checkout@v4
+        with:
+          repository: observable-labs/EvalRAG
+          path: EvalRAG
+          token: ${{ secrets.EVALRAG_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install both, editable
+        working-directory: EvalRAG
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "./evaluation[dev]"
+          pip install -e ./wikillm_retrieval
+
+      # No provider key on purpose: the eval smoke runs the lanes that need no
+      # network, so the gate never fails for a reason the change did not cause.
+      - name: check
+        working-directory: EvalRAG/evaluation
+        run: scripts/check.sh

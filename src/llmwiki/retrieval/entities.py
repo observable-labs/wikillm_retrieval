@@ -34,9 +34,11 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
+from collections.abc import Mapping, Sized
 from dataclasses import dataclass, field
 
 from .keyword import Document
+from .naming import DEFAULT_NAMING, DocumentNaming
 
 # A surface form shorter than this matches too much to be an entity: two-letter
 # page stems ("AI", "ML") appear inside ordinary prose constantly, and the hub
@@ -128,14 +130,27 @@ class EntityIndex:
         return dict(adjacency)
 
 
-def surface_forms(document: Document) -> set[str]:
+def surface_forms(
+    document: Document, naming: DocumentNaming = DEFAULT_NAMING
+) -> set[str]:
     """The strings that, appearing in someone else's prose, mean this page.
 
-    Title and stem, plus the stem with hyphens read as spaces — `[[station
-    keeping]]` and `station-keeping.md` are the same entity and a corpus will
-    use both spellings.
+    On a wiki: title and stem, plus the stem with hyphens read as spaces —
+    `[[station keeping]]` and `station-keeping.md` are the same entity and a
+    corpus will use both spellings. Which strings those are is the corpus's
+    naming convention, so it comes from `naming.surface_forms`; a corpus keyed
+    on opaque ids passes one yielding the title alone, or the scan would hunt
+    for uuids in prose.
+
+    ⛔ Not `naming.aliases`. An alias is what a *link* may be written as and is
+    addressed deliberately; a surface form is what an author types in a
+    sentence without meaning to link. `wiki/station-keeping.md` is a legitimate
+    link target and would be absurd to scan prose for.
+
+    Forms shorter than `MIN_SURFACE_LENGTH` are dropped whatever the naming
+    says: that is a property of scanning free text, not of the corpus.
     """
-    forms = {document.title, document.stem, document.stem.replace("-", " ")}
+    forms = naming.surface_forms(document)
     return {
         form.strip()
         for form in forms
@@ -143,18 +158,20 @@ def surface_forms(document: Document) -> set[str]:
     }
 
 
-def build_entity_index(documents: list[Document]) -> EntityIndex:
+def build_entity_index(
+    documents: list[Document], naming: DocumentNaming = DEFAULT_NAMING
+) -> EntityIndex:
     """Scan every document for every known page name."""
-    pages = [document for document in documents if document.kind == "wiki"]
+    pages = [document for document in documents if naming.is_page(document)]
     if not pages:
         return EntityIndex(documents=len(documents))
 
     by_form: dict[str, str] = {}
     for page in pages:
-        for form in surface_forms(page):
+        for form in surface_forms(page, naming):
             # First writer wins, and pages are in load order, so the mapping is
             # deterministic across runs even when two pages share a stem.
-            by_form.setdefault(form.lower(), page.path)
+            by_form.setdefault(form.lower(), naming.key(page))
 
     mentions: dict[str, dict[str, int]] = defaultdict(dict)
     forms = sorted(by_form, key=len, reverse=True)
@@ -173,16 +190,18 @@ def build_entity_index(documents: list[Document]) -> EntityIndex:
                 entity = by_form.get(match.group(0).lower())
                 if entity:
                     counts[entity] += 1
+        key = naming.key(document)
         for entity, count in counts.items():
-            mentions[entity][document.path] = count
+            mentions[entity][key] = count
 
     # An entity whose page never writes its own name still has to be anchored to
     # it, or mass that reaches the entity has nowhere to go.
     for page in pages:
-        mentions[page.path].setdefault(page.path, DEFINITION_TF)
+        page_key = naming.key(page)
+        mentions[page_key].setdefault(page_key, DEFINITION_TF)
 
     index = EntityIndex(mentions=dict(mentions), documents=len(documents))
-    return _prune_hubs(index)
+    return prune_hubs(index)
 
 
 def _bounded(escaped: str) -> str:
@@ -197,23 +216,39 @@ def _bounded(escaped: str) -> str:
     return f"{prefix}(?:{escaped}){suffix}"
 
 
-def _prune_hubs(index: EntityIndex) -> EntityIndex:
-    """Drop the entities that appear nearly everywhere.
+def hub_entities(
+    postings: Mapping[str, Sized], document_count: int
+) -> set[str]:
+    """Which entities appear nearly everywhere — the decision, on its own.
 
     Two rules, because a small corpus and a large one fail differently: the top
     1% by degree (SPRIG's rule, which needs a population to be meaningful), and
     anything mentioned by more than half the corpus regardless of rank — which
     is the case that actually bites on a hundred documents.
+
+    Takes the posting lists rather than an `EntityIndex` so that a corpus which
+    stores its mention table somewhere else can ask the same question without
+    first materialising an index it does not otherwise need. `prune_hubs` is
+    this plus the bookkeeping.
     """
+    if not postings:
+        return set()
+
+    ranked = sorted(postings.items(), key=lambda item: (-len(item[1]), item[0]))
+    cut = int(len(ranked) * HUB_PRUNE_FRACTION)
+    ceiling = max(2, int(document_count * HUB_DOCUMENT_SHARE))
+
+    pruned = {entity for entity, _ in ranked[:cut]}
+    pruned |= {entity for entity, posting in ranked if len(posting) > ceiling}
+    return pruned
+
+
+def prune_hubs(index: EntityIndex) -> EntityIndex:
+    """Drop the entities `hub_entities` names, recording which."""
     if not index.mentions:
         return index
 
-    ranked = sorted(index.mentions.items(), key=lambda item: (-len(item[1]), item[0]))
-    cut = int(len(ranked) * HUB_PRUNE_FRACTION)
-    ceiling = max(2, int(index.documents * HUB_DOCUMENT_SHARE))
-
-    pruned = {entity for entity, _ in ranked[:cut]}
-    pruned |= {entity for entity, postings in ranked if len(postings) > ceiling}
+    pruned = hub_entities(index.mentions, index.documents)
     if not pruned:
         return index
     return EntityIndex(
@@ -223,10 +258,19 @@ def _prune_hubs(index: EntityIndex) -> EntityIndex:
     )
 
 
+# The name before it was published. Kept so an internal caller does not have to
+# change in the same commit that widens the surface.
+_prune_hubs = prune_hubs
+
+
 __all__ = [
     "ENTITY_PREFIX",
     "MAX_MENTIONS_PER_DOCUMENT",
     "EntityIndex",
     "build_entity_index",
     "surface_forms",
+    "HUB_DOCUMENT_SHARE",
+    "HUB_PRUNE_FRACTION",
+    "hub_entities",
+    "prune_hubs",
 ]

@@ -6,6 +6,13 @@ Three behaviours matter and are easy to lose:
   character bigrams plus single characters — otherwise a 4-character query
   matches nothing unless the page repeats it verbatim.
 * Stop words are removed from *queries only*, never from documents.
+* **The token count is capped.** Query text is the one unbounded input on the
+  retrieval hot path, and every token becomes a term in an FTS5 `OR` chain that
+  is then matched against every document. Measured: a 20,000-word query is 8 ms
+  to tokenize and **200 ms of FTS5 work**, linear in the word count, against a
+  measured maximum of **9** tokens across the 44 real questions in the atlas
+  suite. Nothing else in the ladder was unbounded — `top_k` is clamped to
+  `MAX_TOP_K` and lane depth to `MIN_CANDIDATES` — so this was it.
 * **Single-character tokens are dropped, except digits.** The original rule
   dropped every one-character token as noise, which silently discarded the digit
   in `Aurora-1` — separators split it into `aurora` and `1` — and made every
@@ -35,6 +42,20 @@ _SEPARATORS = re.compile(
 )
 _CJK_RANGE = re.compile(r"[㐀-鿿]")
 
+# How many distinct terms one query may contribute to a MATCH expression.
+#
+# ⭐ Not a tuning parameter: the whole point is that it is far above any real
+# query and far below a hostile one. Real questions measure at 9 tokens
+# (maximum, atlas suite, n=44); this is seven times that, and it is the
+# difference between 200 ms and under one for a pasted document.
+#
+# ⚠️ A refuted hypothesis, recorded because it is the one that looks true: the
+# CJK bigram expansion is *not* an amplifier. It multiplies characters, but the
+# result is deduplicated, so a 4,000-character repetition of the same phrase
+# collapses to 9 tokens like any other query. The exposure was ordinary English
+# word count all along.
+MAX_QUERY_TOKENS = 64
+
 
 def contains_cjk(text: str) -> bool:
     """Whether a string holds CJK characters, which segment differently.
@@ -46,8 +67,19 @@ def contains_cjk(text: str) -> bool:
     return bool(_CJK_RANGE.search(text))
 
 
-def tokenize_query(query: str) -> list[str]:
-    """Lowercase tokens, CJK-expanded, stop-words removed, deduplicated."""
+def tokenize_query(query: str, max_tokens: int = MAX_QUERY_TOKENS) -> list[str]:
+    """Lowercase tokens, CJK-expanded, stop-words removed, deduplicated, capped.
+
+    `max_tokens` bounds the work one query may ask of the lexical lane; pass 0
+    to lift it. When it binds, the tokens kept are the first distinct ones in
+    query order rather than the alphabetically smallest — the front of a query
+    is what the asker wrote first, and truncating a sorted set would keep
+    whatever happens to start with "a".
+
+    Deduplication is order-preserving so that the cap has something meaningful
+    to truncate; for any query under the cap the result is identical to the
+    sorted set it has always returned.
+    """
     raw = [
         token
         for token in _SEPARATORS.split(query.lower())
@@ -66,7 +98,10 @@ def tokenize_query(query: str) -> list[str]:
         else:
             tokens.append(token)
 
-    return sorted(set(tokens))
+    distinct = list(dict.fromkeys(tokens))
+    if max_tokens and len(distinct) > max_tokens:
+        distinct = distinct[:max_tokens]
+    return sorted(distinct)
 
 
 def trim_query_punctuation(value: str) -> str:

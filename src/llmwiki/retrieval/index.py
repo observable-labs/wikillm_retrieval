@@ -25,12 +25,14 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 from .calibration import LexicalCalibration, calibrate
 from .entities import MAX_MENTIONS_PER_DOCUMENT, EntityIndex, build_entity_index
 from .graph import WikiGraph, build_graph, relevance
 from .keyword import Document, load_documents
-from .lexical import LexicalIndex
+from .naming import DEFAULT_NAMING, DocumentNaming
+from .lexical import LexicalIndex, LexicalSearcher
 from .ppr import DEFAULT_SELF_WEIGHT, transitions
 
 # How much a text mention is worth against a curated wikilink, before row
@@ -52,30 +54,100 @@ MENTION_SCALE = 0.05
 # and both are hot in an eval run — but an ablation sweep opens a few more.
 # Beyond this, cached indexes hold whole corpora alive for no gain.
 _CACHE_LIMIT = 4
-_cache: "dict[tuple[str, bool], tuple[str, SearchIndex]]" = {}
+_cache: "dict[tuple[str, bool], tuple[str, InMemoryIndex]]" = {}
+
+
+@runtime_checkable
+class CorpusIndex(Protocol):
+    """What the ranking ladder needs from a corpus, and nothing more.
+
+    Read off `pipeline.search`'s own call sites rather than designed: this is
+    the exact surface the ladder already used, extracted so that a corpus the
+    package did not build can be ranked by it.
+
+    A `CorpusIndex` is one corpus, and it cannot widen its own scope. There is
+    deliberately no filter, no tenant and no query-time selector anywhere in
+    this protocol. An implementation over a multi-tenant store is constructed
+    already scoped to one tenant by the layer that resolved access; a protocol
+    able to ask for a different corpus is an access-control bug no conformance
+    test can catch.
+
+    Three members are `| None` because they describe how the *default*
+    implementation derives its edges. An index that stores its adjacency
+    directly has no `WikiGraph` to hand back and no `EntityIndex` behind it, and
+    must still be a legal corpus; `adjacency()` and `transitions()` are the
+    members the ladder actually diffuses over.
+    """
+
+    documents: list[Document]
+    graph: "WikiGraph | None"
+    entities: "EntityIndex | None"
+    lexical: LexicalSearcher | None
+    build_seconds: float
+
+    @property
+    def by_path(self) -> dict[str, Document]:
+        """Key -> document, for every document. Stable across calls."""
+        ...
+
+    def adjacency(
+        self,
+        entity_edges: bool = True,
+        curated_links: bool = True,
+        mentions_per_document: int = ...,
+        mention_scale: float = ...,
+    ) -> dict[str, dict[str, float]]:
+        """The weighted graph diffusion runs over. May be empty."""
+        ...
+
+    def transitions(
+        self,
+        entity_edges: bool = True,
+        curated_links: bool = True,
+        mentions_per_document: int = ...,
+        self_weight: float = ...,
+        mention_scale: float = ...,
+    ) -> dict[str, list[tuple[str, float]]]:
+        """`adjacency` row-normalised. Every row sums to 1."""
+        ...
+
+    def calibration(self) -> LexicalCalibration:
+        """What a well-aimed query scores here - the abstention fence."""
+        ...
+
+    def close(self) -> None:
+        """Release whatever was opened. Must be idempotent."""
+        ...
 
 
 @dataclass
-class SearchIndex:
-    """Documents plus every structure derived from them."""
+class InMemoryIndex:
+    """Documents plus every structure derived from them, held in memory.
+
+    The default `CorpusIndex`: it *builds* the graph, the entity index and an
+    FTS5 table from `list[Document]` at construction. That is the right shape
+    for a directory of markdown read per query, and the wrong one for a corpus
+    already persisted somewhere - which is why the protocol above exists.
+    """
 
     documents: list[Document]
-    graph: WikiGraph
-    entities: EntityIndex
-    lexical: LexicalIndex | None = None
+    graph: WikiGraph | None
+    entities: EntityIndex | None
+    lexical: LexicalSearcher | None = None
     build_seconds: float = 0.0
     fingerprint: str = ""
     _adjacency: dict = field(default_factory=dict, repr=False)
     _transitions: dict = field(default_factory=dict, repr=False)
     _by_path: dict = field(default_factory=dict, repr=False)
     _calibration: LexicalCalibration | None = field(default=None, repr=False)
+    naming: DocumentNaming = field(default=DEFAULT_NAMING, repr=False)
 
     @property
     def by_path(self) -> dict[str, Document]:
         # Rebuilt per call this was O(corpus) twice per query, which on a corpus
         # of any size is most of what the query costs.
         if not self._by_path:
-            self._by_path = {document.path: document for document in self.documents}
+            self._by_path = {self.naming.key(document): document for document in self.documents}
         return self._by_path
 
     def adjacency(
@@ -100,14 +172,14 @@ class SearchIndex:
             return self._adjacency[key]
 
         merged: dict[str, dict[str, float]] = defaultdict(dict)
-        if curated_links:
+        if curated_links and self.graph is not None:
             for path, neighbors in self.graph.adjacency.items():
                 for neighbor in neighbors:
                     weight, _ = relevance(self.graph, path, neighbor)
                     if weight > 0:
                         merged[path][neighbor] = weight
 
-        if entity_edges:
+        if entity_edges and self.entities is not None:
             for path, neighbors in self.entities.edges(mentions_per_document).items():
                 for neighbor, weight in neighbors.items():
                     current = merged[path].get(neighbor, 0.0)
@@ -157,14 +229,19 @@ class SearchIndex:
             self.lexical.close()
 
 
-def build_index(documents: list[Document], lexical: bool = True) -> SearchIndex:
+def build_index(
+    documents: list[Document],
+    lexical: bool = True,
+    naming: DocumentNaming = DEFAULT_NAMING,
+) -> InMemoryIndex:
     """Build every derived structure from documents already in memory."""
     started = time.perf_counter()
-    index = SearchIndex(
+    index = InMemoryIndex(
         documents=documents,
-        graph=build_graph(documents),
-        entities=build_entity_index(documents),
-        lexical=LexicalIndex(documents) if lexical else None,
+        graph=build_graph(documents, naming=naming),
+        entities=build_entity_index(documents, naming=naming),
+        lexical=LexicalIndex(documents, naming=naming) if lexical else None,
+        naming=naming,
     )
     index.build_seconds = time.perf_counter() - started
     return index
@@ -176,7 +253,8 @@ def open_index(
     documents: list[Document] | None = None,
     lexical: bool = True,
     use_cache: bool = True,
-) -> SearchIndex:
+    naming: DocumentNaming = DEFAULT_NAMING,
+) -> InMemoryIndex:
     """The cached index for a project, rebuilt when the corpus has changed.
 
     Passing `documents` explicitly bypasses the cache: the caller has stated
@@ -184,7 +262,7 @@ def open_index(
     would let the two disagree.
     """
     if documents is not None:
-        return build_index(documents, lexical=lexical)
+        return build_index(documents, lexical=lexical, naming=naming)
 
     key = (str(project.root), include_sources)
     if use_cache:
@@ -193,7 +271,7 @@ def open_index(
         if cached and cached[0] == current:
             return cached[1]
 
-    index = build_index(load_documents(project, include_sources), lexical=lexical)
+    index = build_index(load_documents(project, include_sources), lexical=lexical, naming=naming)
     if use_cache:
         index.fingerprint = current
         previous = _cache.pop(key, None)
@@ -260,6 +338,12 @@ def clear_cache() -> None:
         index.close()
 
 
+# The name this class had before the protocol was extracted from it.
+# Load-bearing: `ragharness` annotates on it from another repository and pins it
+# in its contract tests. It is an alias, not a deprecation.
+SearchIndex = InMemoryIndex
+
+
 __all__ = [
     "MENTION_SCALE",
     "SearchIndex",
@@ -267,4 +351,6 @@ __all__ = [
     "clear_cache",
     "corpus_fingerprint",
     "open_index",
+    "CorpusIndex",
+    "InMemoryIndex",
 ]

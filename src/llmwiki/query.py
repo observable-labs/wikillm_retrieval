@@ -116,7 +116,8 @@ def ask(
     from .retrieval.profiles import resolve as resolve_profile
 
     include = settings.search_sources if include_sources is None else include_sources
-    selected = options if options is not None else resolve_profile(profile).options
+    resolved = resolve_profile(profile)
+    selected = options if options is not None else resolved.options
     response = search(
         project,
         question,
@@ -124,6 +125,11 @@ def ask(
         include_sources=include,
         embedding_config=settings.embedding,
         options=selected,
+        # The clock starts here, not inside a stage: a deadline that each stage
+        # restarts is five deadlines, and the one the user is waiting on is the
+        # sum. `balanced` sets no turn budget, so on the text path this only
+        # replaces a 60-second embedding timeout with a sane one.
+        deadline=resolved.deadline(),
     )
     answer = answer_from(
         project, question, settings, response,

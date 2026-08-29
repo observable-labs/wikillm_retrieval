@@ -67,8 +67,16 @@ class PageHit:
 
 # ── embedding provider ────────────────────────────────────────────────────
 
-def embed_texts(texts: list[str], config: EmbeddingConfig) -> list[list[float]]:
-    """POST /v1/embeddings. Batched, with a halving retry for oversize input."""
+def embed_texts(
+    texts: list[str], config: EmbeddingConfig, timeout: float | None = None
+) -> list[list[float]]:
+    """POST /v1/embeddings. Batched, with a halving retry for oversize input.
+
+    `timeout` overrides the configured one, in seconds. It exists for the query
+    path: a turn with a deadline lends the embedding call what is left of it,
+    which is usually far less than a configured ceiling meant for an ingest run
+    of thousands of chunks.
+    """
     config.require_enabled()
     if not texts:
         return []
@@ -79,23 +87,31 @@ def embed_texts(texts: list[str], config: EmbeddingConfig) -> list[list[float]]:
 
     for start in range(0, len(texts), max(1, config.batch_size)):
         batch = texts[start : start + max(1, config.batch_size)]
-        out.extend(_embed_batch(url, batch, headers, config))
+        out.extend(_embed_batch(url, batch, headers, config, timeout))
     return out
 
 
-def _embed_batch(url: str, batch: list[str], headers: dict, config: EmbeddingConfig) -> list[list[float]]:
+def _embed_batch(
+    url: str,
+    batch: list[str],
+    headers: dict,
+    config: EmbeddingConfig,
+    timeout: float | None = None,
+) -> list[list[float]]:
     payload: dict = {"model": config.model, "input": batch}
     if config.dimensions:
         payload["dimensions"] = config.dimensions
     try:
-        response = post_json(url, payload, headers, config.timeout)
+        response = post_json(
+            url, payload, headers, config.timeout if timeout is None else timeout
+        )
     except ProviderError:
         # Some servers cap request size rather than input count; halving the
         # batch is the cheapest way to find the ceiling without configuration.
         if len(batch) > 1:
             middle = len(batch) // 2
-            return _embed_batch(url, batch[:middle], headers, config) + _embed_batch(
-                url, batch[middle:], headers, config
+            return _embed_batch(url, batch[:middle], headers, config, timeout) + _embed_batch(
+                url, batch[middle:], headers, config, timeout
             )
         raise
 
@@ -114,8 +130,8 @@ def _embed_batch(url: str, batch: list[str], headers: dict, config: EmbeddingCon
     return vectors
 
 
-def embed_query(text: str, config: EmbeddingConfig) -> list[float]:
-    return embed_texts([text], config)[0]
+def embed_query(text: str, config: EmbeddingConfig, timeout: float | None = None) -> list[float]:
+    return embed_texts([text], config, timeout)[0]
 
 
 def _embeddings_url(base_url: str) -> str:

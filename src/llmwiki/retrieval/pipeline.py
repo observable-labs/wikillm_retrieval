@@ -43,6 +43,7 @@ from .ppr import (
     DEFAULT_TAIL_WEIGHT,
     rank_by_ppr,
 )
+from .telemetry import EXPIRED, FAILED, NULL_SINK, OK, SKIPPED, Deadline, Sink
 from .tokenize import tokenize_query, trim_query_punctuation
 
 DEFAULT_TOP_K = 20
@@ -145,6 +146,12 @@ class LanesRun:
     # configuration working, and reporting it as either of the other two would
     # make a working gate look like a broken lane.
     abstained: tuple[str, ...] = ()
+    # Lanes that would have run and were not given the time. The fourth state,
+    # and it has to stay distinct from the three above: a lane that is off was
+    # a configuration choice, a lane that failed is a broken backend, a lane
+    # that abstained is the gate working — and a lane that expired is a slow
+    # backend, which is a different page of the runbook from a broken one.
+    expired: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, bool]:
         return {"lexical": self.lexical, "vector": self.vector, "graph": self.graph}
@@ -184,14 +191,25 @@ class SearchResponse:
 
 
 @contextmanager
-def _stage(stages: dict[str, float], name: str):
-    """Time one stage into `stages`, accumulating across repeat entries."""
+def _stage(stages: dict[str, float], name: str, sink: Sink = NULL_SINK, outcome: str = OK):
+    """Time one stage into `stages`, accumulating across repeat entries.
+
+    The outcome travels with the duration because a stage that took 4 ms because
+    it was skipped and one that took 4 ms because it succeeded are the same
+    number and different facts. A raising body is recorded as `failed` and the
+    exception is left to the caller.
+    """
     started = perf_counter()
+    result = outcome
     try:
         yield
+    except BaseException:
+        result = FAILED
+        raise
     finally:
         elapsed = (perf_counter() - started) * 1000.0
         stages[name] = round(stages.get(name, 0.0) + elapsed, 3)
+        sink.stage(name, round(elapsed, 3), result)
 
 
 def search(
@@ -203,7 +221,17 @@ def search(
     documents: list[Document] | None = None,
     options: RetrievalOptions | None = None,
     index: SearchIndex | None = None,
+    deadline: Deadline | None = None,
+    sink: Sink = NULL_SINK,
 ) -> SearchResponse:
+    """Rank `query` over the project.
+
+    `deadline` is the turn's remaining time, shared by every stage below. Its
+    absence is the shipped text path — no budget, nothing expires — and its
+    presence never fails the turn: each stage that cannot be afforded falls back
+    to the one below it and says so, because a spoken answer built from the
+    lexical lane alone is worth more than a better answer nobody waited for.
+    """
     if not query.strip():
         return SearchResponse(results=[], mode="keyword")
 
@@ -212,7 +240,7 @@ def search(
     depth = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
     stages: dict[str, float] = {}
     if index is None:
-        with _stage(stages, "open"):
+        with _stage(stages, "open", sink):
             index = open_index(
                 project,
                 include_sources=include_sources,
@@ -227,7 +255,7 @@ def search(
     query_phrase = trim_query_punctuation(query.lower())
 
     # ── S1a: lexical ──────────────────────────────────────────────────
-    with _stage(stages, "lexical"):
+    with _stage(stages, "lexical", sink):
         lexical_ranked = _lexical_lane(index, query, effective_tokens, query_phrase, depth, options)
     lanes.lexical = True
     lexical_rank = {path: rank for rank, (path, _) in enumerate(lexical_ranked, start=1)}
@@ -238,7 +266,18 @@ def search(
     vector_hits = 0
     query_vector: list[float] | None = None
     if options.vector and embedding_config is not None:
-        if not (embedding_config.enabled and embedding_config.model):
+        if deadline is not None and not deadline.affords("embedding"):
+            # The `ProviderError` branch below is the right fallback and this is
+            # a deadline in front of it: the same degradation to lexical+graph,
+            # reached before the round trip rather than after waiting out its
+            # timeout.
+            lanes.expired += ("vector",)
+            sink.stage("embed", 0.0, EXPIRED)
+            notes.append(
+                "the query embedding was skipped: the turn's budget was spent "
+                "before it could run, so this ranking is the lexical lane's"
+            )
+        elif not (embedding_config.enabled and embedding_config.model):
             notes.append("vector search is not configured — no embedding model")
         elif not (Path(project.state_dir) / "vectors.db").exists():
             notes.append(
@@ -255,6 +294,8 @@ def search(
                     vector_rank,
                     vector_score,
                     stages,
+                    sink,
+                    None if deadline is None else deadline.for_stage("embedding"),
                 )
                 lanes.vector = True
                 if covered < len(index.documents):
@@ -269,7 +310,21 @@ def search(
                 # A dead embedding endpoint degrades to lexical+graph rather
                 # than failing the query — the same fallback the desktop app
                 # takes. The note is what stops that being invisible.
-                notes.append(f"vector search unavailable, using keyword search only ({exc})")
+                #
+                # A timeout arrives here too, and it is recorded as an expiry
+                # rather than a failure: the endpoint answered nothing in the
+                # time it was given, which is a slow backend and not a broken
+                # one, and the two have different fixes.
+                if _looks_like_a_timeout(exc):
+                    lanes.expired += ("vector",)
+                    notes.append(
+                        f"the query embedding did not answer within its budget, "
+                        f"using keyword search only ({exc})"
+                    )
+                else:
+                    notes.append(
+                        f"vector search unavailable, using keyword search only ({exc})"
+                    )
 
     # ── S1b'/S1c: abstention, then fusion ─────────────────────────────
     # A lane with nothing to say should not get an equal vote. The lexical lane
@@ -280,7 +335,7 @@ def search(
     abstain = False
     lexical_top = lexical_ranked[0][1] if lexical_ranked else None
     if options.lexical_gate and vector_rank and lexical_ranked:
-        with _stage(stages, "calibrate"):
+        with _stage(stages, "calibrate", sink):
             calibration = index.calibration()
         top_score = lexical_ranked[0][1]
         if calibration.abstains(top_score, options.abstain_quantile):
@@ -296,7 +351,7 @@ def search(
             )
             lexical_rank = {}
 
-    with _stage(stages, "fuse"):
+    with _stage(stages, "fuse", sink):
         fused = _fuse(
             lexical_rank,
             vector_rank,
@@ -315,8 +370,22 @@ def search(
         # of entity mentions on the strength of no lexical evidence whatever —
         # which on the keyword-hostile suite costs 0.03 recall at k=3 and 64 ms.
         lanes.abstained += ("graph",)
+    elif options.graph_ppr and fused and deadline is not None and not deadline.affords(
+        "neighbourhood"
+    ):
+        # `graph_gate` already knows how to run without diffusion; this is the
+        # same path, reached for a different reason. Diffusion is the rung most
+        # worth dropping under a deadline: it is the one that costs tens of
+        # milliseconds and the one whose absence leaves a ranking rather than
+        # nothing.
+        lanes.expired += ("graph",)
+        sink.stage("diffuse", 0.0, EXPIRED)
+        notes.append(
+            "graph diffusion was skipped: the turn's budget did not cover it, "
+            "so this ranking is the fused list without it"
+        )
     elif options.graph_ppr and fused:
-        with _stage(stages, "diffuse"):
+        with _stage(stages, "diffuse", sink):
             adjacency = index.adjacency(
                 entity_edges=options.entity_edges,
                 curated_links=options.curated_links,
@@ -346,7 +415,7 @@ def search(
                 lanes.graph = True
                 graph_hits = sum(1 for path, _ in ranked if path not in already_fused)
 
-    with _stage(stages, "materialize"):
+    with _stage(stages, "materialize", sink):
         results = _materialize(
             ranked,
             index=index,
@@ -358,6 +427,23 @@ def search(
             query=query,
             options=options,
         )
+
+    if deadline is not None:
+        search_budget = deadline.budgets.search
+        if search_budget is not None and deadline.elapsed_ms > search_budget:
+            # The plan says a hybrid search over its budget fails the turn.
+            # It does not, and the reason is that by the time this is knowable
+            # the ranking exists: aborting here would discard an answer that has
+            # already been paid for. The overrun is recorded instead, which is
+            # what a budget is for — `sink` sees `expired` on the turn and the
+            # caller sees the note.
+            sink.stage("search", round(deadline.elapsed_ms, 3), EXPIRED)
+            notes.append(
+                f"retrieval took {deadline.elapsed_ms:.0f} ms against a "
+                f"{search_budget:.0f} ms budget"
+            )
+        else:
+            sink.stage("search", round(deadline.elapsed_ms, 3), OK)
 
     return SearchResponse(
         results=results,
@@ -415,6 +501,8 @@ def _vector_lane(
     vector_rank: dict[str, int],
     vector_score: dict[str, float],
     stages: dict[str, float] | None = None,
+    sink: Sink = NULL_SINK,
+    budget_ms: float | None = None,
 ) -> tuple[int, int, list[float] | None]:
     """Returns (pages ranked, documents the index covers, the query vector).
 
@@ -426,9 +514,17 @@ def _vector_lane(
 
     stages = {} if stages is None else stages
     store_path = Path(project.state_dir) / "vectors.db"
-    with _stage(stages, "embed"):
-        query_vector = embed_query(query, embedding_config)
-    with _stage(stages, "vector"):
+    with _stage(stages, "embed", sink):
+        # The timeout is passed only when there is one. A turn with no deadline
+        # calls the embedder exactly as it did before deadlines existed, which
+        # keeps the shipped path — and anything that has stubbed this function —
+        # off a code path it never asked for.
+        query_vector = (
+            embed_query(query, embedding_config)
+            if budget_ms is None
+            else embed_query(query, embedding_config, budget_ms / 1000.0)
+        )
+    with _stage(stages, "vector", sink):
         with VectorStore(store_path) as store:
             chunk_hits = store.search(query_vector, max(depth * 3, 30))
             covered, _chunks = store.count()
@@ -598,3 +694,17 @@ __all__ = [
     "SearchResponse",
     "search",
 ]
+
+
+def _looks_like_a_timeout(exc: Exception) -> bool:
+    """Whether a `ProviderError` is a clock running out rather than a refusal.
+
+    The HTTP helper flattens `urllib` errors into one exception type, so the
+    distinction has to be read back off the message. It is a heuristic and it
+    fails safe: a misread timeout is recorded as a plain failure, which is the
+    state the code had before deadlines existed.
+    """
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
+
+

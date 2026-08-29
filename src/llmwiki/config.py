@@ -118,6 +118,36 @@ class EmbeddingConfig:
             )
 
 
+@dataclass(frozen=True)
+class StageBudgets:
+    """Milliseconds per stage, and the turn they are spent out of.
+
+    `turn is None` is the shipped text path: no deadline, because a research
+    question that takes two seconds is not a defect. Voice is the path where the
+    deadline *is* the feature — a spoken answer that arrives late has already
+    failed, whatever it says — so `voice()` sets a turn and every stage inherits
+    a ceiling from it.
+
+    The embedding budget is the one that matters today. It defaulted to 60
+    seconds, which is wrong on both paths and not only the spoken one: a
+    research turn that stalls a minute on a dead endpoint is also a defect, just
+    a less visible one. The fallback it guards already exists — the
+    `ProviderError` branch degrades to lexical+graph and leaves a note — and all
+    a deadline does is reach it sooner.
+    """
+
+    turn: float | None = None
+    rewrite: float = 200.0
+    embedding: float = 3_000.0
+    search: float = 800.0
+    neighbourhood: float = 150.0
+
+    @classmethod
+    def voice(cls) -> "StageBudgets":
+        """The spoken path: a turn budget, and stages sized to fit inside it."""
+        return cls(turn=400.0, rewrite=200.0, embedding=60.0, search=80.0, neighbourhood=15.0)
+
+
 @dataclass
 class Settings:
     llm: LLMConfig = field(default_factory=LLMConfig)

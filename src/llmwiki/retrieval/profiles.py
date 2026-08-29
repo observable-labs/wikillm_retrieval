@@ -31,23 +31,37 @@ from the query string.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
+from ..config import StageBudgets
 from .calibration import ABSTAIN_QUANTILE
 from .pipeline import DEFAULT_TOP_K, RetrievalOptions
 
 
 @dataclass(frozen=True)
 class Profile:
-    """A retrieval configuration with a name and a reason."""
+    """A retrieval configuration with a name, a reason, and a clock.
+
+    `budgets` is the third axis, added by build-plan A2. Depth is how much to
+    look at, lane weights are who to trust, and budgets are how long the turn
+    may take — and only `voice` sets a turn deadline, because a spoken answer
+    that arrives late has already failed while a research answer has not.
+    """
 
     name: str
     top_k: int
     options: RetrievalOptions
     description: str
+    budgets: StageBudgets = field(default_factory=StageBudgets)
 
     def with_top_k(self, top_k: int | None) -> "Profile":
         return self if top_k is None else replace(self, top_k=top_k)
+
+    def deadline(self) -> "Deadline":
+        """A fresh clock for one turn under this profile."""
+        from .telemetry import Deadline
+
+        return Deadline(self.budgets)
 
 
 _BALANCED = RetrievalOptions()
@@ -60,6 +74,10 @@ PROFILES: dict[str, Profile] = {
         # the graph lane's 64 ms on a wiki-shaped corpus buys nothing a listener
         # will hear.
         options=replace(_BALANCED, graph_ppr=False, vector_depth=20),
+        # The only profile with a turn deadline. Every stage below it falls back
+        # rather than failing, so the budget buys a worse answer on time instead
+        # of a better one late — which on this path is the same as no answer.
+        budgets=StageBudgets.voice(),
         description="shallow and local; for an answer that has to start speaking",
     ),
     "balanced": Profile(

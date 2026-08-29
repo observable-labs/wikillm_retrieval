@@ -268,6 +268,9 @@ def _lanes(response) -> dict:
         return {}
     ran = lanes.as_dict()
     ran["abstained"] = list(lanes.abstained)
+    # A lane that ran out of time is why a turn's ranking looks unlike the same
+    # turn's ranking yesterday, and the log is where that is answered later.
+    ran["expired"] = list(lanes.expired)
     ran["mode"] = getattr(response, "mode", "")
     return ran
 

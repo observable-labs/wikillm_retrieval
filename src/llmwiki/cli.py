@@ -286,6 +286,7 @@ def cmd_search(args, printer: Printer) -> int:
         include_sources=settings.search_sources if args.sources is None else args.sources,
         embedding_config=settings.embedding,
         options=profile.options,
+        deadline=profile.deadline(),
     )
     # Both paths log. A retrieval-only turn is still a turn — it is the one the
     # voice path will take — and `cited` stays NULL rather than empty, because
@@ -301,6 +302,13 @@ def cmd_search(args, printer: Printer) -> int:
                 {
                     "mode": response.mode,
                     "lanes": response.lanes.as_dict(),
+                    # The seam, on the surface a caller can read: which stages
+                    # the turn was spent in, and which lanes were not given the
+                    # time to run. A budget is only checkable from outside if
+                    # the stages are.
+                    "stage_ms": response.stage_ms,
+                    "abstained": list(response.lanes.abstained),
+                    "expired": list(response.lanes.expired),
                     "token_hits": response.token_hits,
                     "vector_hits": response.vector_hits,
                     "graph_hits": response.graph_hits,

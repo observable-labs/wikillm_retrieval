@@ -10,6 +10,7 @@ from .log import QueryLog, QueryRecord, open_log
 from .pipeline import LanesRun, RetrievalOptions, SearchResponse, search
 from .ppr import personalized_pagerank, rank_by_ppr
 from .profiles import DEFAULT_PROFILE, PROFILES, Profile, resolve as resolve_profile
+from .telemetry import NULL_SINK, Deadline, RecordingSink, Sink
 from .tokenize import tokenize_query
 
 __all__ = [
@@ -28,6 +29,10 @@ __all__ = [
     "SearchIndex",
     "SearchResponse",
     "SearchResult",
+    "Deadline",
+    "NULL_SINK",
+    "RecordingSink",
+    "Sink",
     "WikiGraph",
     "build_entity_index",
     "build_graph",

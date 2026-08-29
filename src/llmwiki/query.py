@@ -80,6 +80,16 @@ class Answer:
     pages_found: int = 0
     context_chars: int = 0
     notes: list[str] = field(default_factory=list)
+    # What the call cost, as the provider reported it. `Completion` has carried
+    # these since the client was written and `Answer` dropped them, so every
+    # caller downstream — the CLI, an evaluation harness — could report how long
+    # an answer took and not what it cost. Two configurations with the same
+    # latency and a threefold difference in prompt size are not the same
+    # configuration, and a quality-per-token comparison is the only way a
+    # latency ladder's rungs can be told apart from each other.
+    # `None` means the provider did not say, which is not zero.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 def ask(
@@ -210,6 +220,8 @@ def answer_from(
         pages_found=len(response.results),
         context_chars=len(packed),
         notes=response.notes,
+        input_tokens=completion.input_tokens,
+        output_tokens=completion.output_tokens,
     )
 
 

@@ -199,7 +199,7 @@ step against its committed acceptance criterion, rather than asserted.
 | Build step | Acceptance needs | Instrument | Status |
 |---|---|---|---|
 | A1 query log | rows written; degrades when unwritable | llmwiki unit tests | ✅ not a harness concern |
-| A2 deadlines | per-stage duration and budget; bounded p99 | **E51** | ⚠️ **partial** — two named stages plus a residual (below) |
+| A2 deadlines | per-stage duration and budget; bounded p99 | **E51 + E57** | ✅ closed — nine named stages, each with an outcome (§12) |
 | A3 budget input | sweep budget, not profile name | **E50** | ✅ closed here |
 | A4 escalation | 3-way cost/quality comparison | **E50 + E52** | ✅ closed here |
 | B1 chunk packing | swept `k`, judged, position-aware | **E46** + existing **E45** | ✅ closed, with a dependency |
@@ -236,6 +236,15 @@ one document to rewrite (B2). All five are in §5 rather than papered over.
 > The instrument is real and the criterion is not fully served, which is the
 > distinction §7's "an acceptance criterion is not an instrument" was about,
 > arriving in the one row that looked safest.
+>
+> **And after closing it, eighteen — with the judgement above unrevised.** E57
+> did not add instrumentation to llmwiki. llmwiki had been keeping a per-stage
+> map and reporting an outcome for each stage through a `Sink` since A2 landed;
+> the adapter was discarding both and substituting the two names it timed from
+> outside. The criterion was served by the system under test and thrown away at
+> the boundary, which is a worse failure than the one recorded above and was
+> invisible for the same reason: a residual is a number, and a number gets read
+> as a measurement. §12.
 
 **Two steps appear in no row, correctly.** E47 (`SUSPECT_SWITCH`) and E55's
 falsifier are suite-health guards rather than instruments for a build step — they
@@ -827,3 +836,169 @@ six more, five of which are above and none of which the coverage matrix could
 have caught, because every one of them is a fact about code the matrix was not
 reading. The sixth is not a design error at all — it is a `TypeError`, and §10.8
 is about why no unit test could see it.
+
+## 12. Closing the gaps the acceptance run left
+
+§10 reported what the instruments found. This section reports what closing their
+own gaps found, which turned out to be more interesting, because three of the
+four gaps were hiding a conclusion rather than merely limiting one.
+
+The gaps were named in this order of severity: **A2's residual** (a blown budget
+could be detected and not attributed), **statistical power** (per-class blocks
+with n between 8 and 14 and no statement of what that n supports), **the
+cross-repo seam** (§10.8's `TypeError`, which no unit test in either repository
+could see), and **generated passage gold** (correct by construction, which is not
+the same as checked). Five steps, numbered on from E56.
+
+### E57 — the adapter forwards the stages llmwiki already names
+
+**The finding is the shape of the defect, not the fix.** `SearchResponse.stage_ms`
+has carried `open`, `lexical`, `embed`, `vector`, `calibrate`, `fuse`, `diffuse`
+and `materialize` since A2; `search()` takes a `sink` and reports an outcome —
+`ok`, `expired`, `skipped`, `failed` — for every one of them. The adapter read
+neither. It timed the index open and the provider round trip from the outside
+and shipped `{"load", "remote"}`, and the runner dutifully computed a residual
+against a wall clock. Nothing was missing. It was being dropped at the boundary
+and replaced with something that looked like an answer.
+
+Two things had to be got right to forward it.
+
+**`remote` is not a stage.** The provider round trip happens *inside* llmwiki's
+`embed` stage, so a map holding both counts it twice, and on a turn that is
+almost entirely round trip the residual goes negative — where a `max(0.0, …)`
+clamp had been quietly turning it into `0.00`, which reads as "fully attributed".
+`_stages` now returns a note when the named stages exceed the turn, and the note
+reaches the row. A decomposition that cannot be trusted has to say so; clamping
+it to zero is the class of quiet wrong number this harness exists to refuse.
+
+**A duration and an outcome are different facts.** A stage that took 0 ms because
+it was fast and one that took 0 ms because the deadline dropped it are the same
+number. The dropped one has no duration at all — llmwiki reports it straight to
+the sink — so it appears *only* in the outcome map, and on a degraded turn that
+is the whole finding.
+
+**D40 — the budget ladder was never flat.** Four roadmaps have recorded
+`llmwiki/full` scoring 0.92 at 40 ms, 0.92 at 100 ms and 0.92 at 400 ms, and read
+the flat row the way §3's E50 predicted a flat row should be read: the rungs buy
+nothing. The stage outcomes say otherwise.
+
+```
+  what each budget stopped the system doing — a rung's cost, in stages
+  llmwiki/full at 40ms:  embed expired on 32/44, search expired on 32/44
+  llmwiki/full at 100ms: embed expired on 32/44
+```
+
+At the cheapest rung the vector lane never ran on three quarters of the
+questions, and recall was 0.92 anyway. That is not a ladder whose rungs are
+decoration. It is a corpus on which the vector lane is not carrying the result,
+and it points somewhere completely different: at what the lexical and graph lanes
+are already doing, and at whether the round trip is worth its 547 ms at all.
+
+**D41 — the overrun is somebody else's network.** Cold, `embed` is 547 ms of a
+557 ms turn, p95 687. C2 and C3 were reported in §10 as failing at 5.3×–6.0× the
+warm p50 with no attribution available. The attribution is now one line, and it
+is not in the ranking: the ranking is 10 ms of it.
+
+### E58 — what a question class can resolve, printed above the numbers it cannot
+
+The harness has had a paired bootstrap since its first roadmap and prints it on
+the total. The per-class blocks — by capability tag, by lexical overlap — never
+carried one, and they are where every finding about *which questions* a system
+wins has come from.
+
+The bound is exact and derived from the test the harness already runs, rather
+than from a normal approximation that would itself be unreliable at these n.
+`sign_test(5, 0) = 0.062` and `sign_test(6, 0) = 0.031`: a two-sided sign test at
+0.05 needs six discordant pairs before it can reject **whatever the effect size**.
+So the smallest difference `n` paired questions can resolve is `6/n`, and below
+six questions the answer is `None` — not a large number, because a large number
+invites the reading this exists to prevent. The harness's own rule that a thing
+not measured is never a number, applied to its own statistics.
+
+**D42 — every per-class block ever printed here is underpowered.**
+
+```
+  system              single-hop   multi-hop    thematic   intra-doc
+                   n          14          12           8           8
+            resolves        0.43        0.50        0.75        0.75
+  ! UNDERPOWERED_EXACT — every class in this block (n=8–14) resolves 0.43–0.75
+    at best, and the widest spread among them is 0.25. The block describes how
+    these questions fell; it does not rank the systems.
+```
+
+An eight-question tag cannot show a 0.25 difference. Not *did not* — cannot, at
+any effect size, because the smallest significant split on eight paired questions
+is six of them flipping the same way. §7's power caveat said this in prose and
+§11.3 repeated it about the passage suite; a caveat in prose does not stop anyone
+reading the column, and it does not update when the suite grows. The dashboard's
+hand-written version of the same claim ("these n are 8 to 14") is now computed,
+and its advice — "read a class where the system loses as a finding" — was the
+opposite of what the bound says and has been replaced.
+
+**This does not touch §10's two headline findings.** E48's coreference cost is
+0.63 on 35 questions and E46's passage gap is 0.00 against 1.00; both are far
+outside any interval a wider set would draw. What it touches is every *next*
+finding, which will be smaller.
+
+### E59 — the contract between the repositories, where a unit test can see it
+
+§10.8 recorded the `TypeError` and why neither suite saw it. `tests/test_contract.py`
+is the general form: the assumptions ragharness makes about llmwiki, executable,
+against the **installed** llmwiki rather than a stub of it. A stub is a copy of
+the assumption, and a copy cannot disagree with the original.
+
+The existing regression test proved the wrapper forwards `*args, **kwargs` to a
+recording double — and would still pass if llmwiki renamed `text` or added a
+required parameter, because the double is written in the test file and agrees
+with the wrapper by construction. The contract test reads llmwiki's own signature
+and asks whether the patch can be called every way llmwiki can be. Reverting
+`remote.py` to its pre-fix signature fails it with both signatures in the
+message. Nine further tests pin `search()`'s parameters, `SearchResponse`'s
+fields, `SearchResult`'s, the sink's triples, `Budget.for_ms`, the outcome
+vocabulary, and `Answer`'s token counts.
+
+Every one skips when llmwiki is not importable, because the harness is not bound
+to llmwiki and a missing optional dependency must not fail its suite — which is
+also why `scripts/check.sh` asserts importability before running them. A skip
+here would make the whole check pass on the one thing it exists to check.
+
+### E60 — one definition of "checked"
+
+`scripts/check.sh`, run by `.github/workflows/check.yml`: both test suites, the
+contract tests with skips treated as failure, a fixture rebuild that must
+reproduce the committed suites, and an end-to-end `compare` on the two lanes that
+need no provider. No network and no API key — a gate whose result depends on
+someone else's endpoint fails for reasons the change did not cause.
+
+**What it cannot do, stated rather than papered over.** The change that breaks
+the contract is usually an *llmwiki* change, and a workflow in the harness's
+repository is not triggered by one. Hence a daily schedule, which bounds the
+delay rather than removing it. The real fix is a mirrored workflow in llmwiki
+calling the same script.
+
+### E61 — passage gold that is checked, not merely constructed
+
+`SpanIndex.covering` returns *a* section containing the fact; gold needs *the*
+section. A fact appearing in two sections has two right answers, the fixture
+names whichever came first, and the passage column starts measuring document
+order. `covering_all` plus `_unambiguous_span` makes the generator refuse at
+build time. Nothing in the corpus triggers it today — all 22 spans are unique,
+and the suites rebuild byte-identically — which is the point: the thing that
+would trigger it is an ordinary edit to the filler prose that nobody would think
+to re-check by hand.
+
+This bounds the failure mode; it does not make the gold independent. The
+generator still writes both the question and the fact, and §11.3's author-bias
+argument applies here with no `verify_hostility` equivalent to bound it.
+
+### What was not closed
+
+**E3 stays blocked on E43.** No shipped system builds the write-back loop, so
+`depth` reports NULL — the honest baseline, and the reason the protocol's ability
+to detect a rise is demonstrated by a test double rather than by any system.
+
+**The two research trees were not merged.** The gap list proposed a symlink. That
+was wrong: `development/research` holds two subtrees `research/` does not, and
+four shared files differ deliberately. They are not copies of one document, they
+are two documents that overlap, and a symlink would have deleted the difference.
+Left alone.

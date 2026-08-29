@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llmwiki"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Build and query a self-maintaining LLM wiki from your documents."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,11 @@ all = ["anthropic>=1.0", "numpy>=1.24", "pypdf>=4.0", "python-docx>=1.1", "openp
 
 [project.scripts]
 llmwiki = "llmwiki.cli:main"
+
+# Single source of truth for the version: __init__.py, which is also what
+# `llmwiki --version` prints. The build reads it from there.
+[tool.hatch.version]
+path = "src/llmwiki/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llmwiki"]

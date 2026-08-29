@@ -197,6 +197,7 @@ def cmd_ask(args, printer: Printer) -> int:
         include_sources=None if args.sources is None else args.sources,
         on_token=on_token if streaming else None,
         profile=getattr(args, "profile", None),
+        budget_ms=getattr(args, "budget_ms", None),
     )
 
     if args.json:
@@ -277,7 +278,9 @@ def cmd_search(args, printer: Printer) -> int:
     from .retrieval import log as query_log
     from .retrieval.profiles import resolve as resolve_profile
 
-    profile = resolve_profile(getattr(args, "profile", None))
+    profile = resolve_profile(getattr(args, "profile", None)).with_budget(
+        getattr(args, "budget_ms", None)
+    )
     query = " ".join(args.query)
     response = search(
         project,
@@ -577,6 +580,17 @@ def build_parser() -> argparse.ArgumentParser:
         """
         from .retrieval.profiles import PROFILES
 
+        sub.add_argument(
+            "--budget-ms",
+            type=int,
+            default=None,
+            help=(
+                "wall clock for the whole turn, in milliseconds. The profile "
+                "says which lanes; this says how much of them fits. At or below "
+                "1000 ms the turn takes the fast path: it drops a rung rather "
+                "than miss the wall"
+            ),
+        )
         sub.add_argument(
             "--profile",
             choices=sorted(PROFILES),

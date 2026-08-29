@@ -142,10 +142,24 @@ class StageBudgets:
     search: float = 800.0
     neighbourhood: float = 150.0
 
+    # The spoken path's shares, as fractions of the turn. Fixed from the voice
+    # build plan's table at 400 ms — rewrite 200, embedding 60, search 80,
+    # neighbourhood 15 — and scaled from there, so a caller who states 200 ms
+    # gets the same ladder at half the size rather than a second opinion.
+    SHARES = {"rewrite": 0.50, "embedding": 0.15, "search": 0.20, "neighbourhood": 0.0375}
+
+    @classmethod
+    def for_turn(cls, total_ms: float) -> "StageBudgets":
+        """A turn of `total_ms`, divided the way the voice table divides 400."""
+        return cls(
+            turn=float(total_ms),
+            **{stage: round(total_ms * share, 3) for stage, share in cls.SHARES.items()},
+        )
+
     @classmethod
     def voice(cls) -> "StageBudgets":
         """The spoken path: a turn budget, and stages sized to fit inside it."""
-        return cls(turn=400.0, rewrite=200.0, embedding=60.0, search=80.0, neighbourhood=15.0)
+        return cls.for_turn(400.0)
 
 
 @dataclass

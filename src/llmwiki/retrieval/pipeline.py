@@ -70,6 +70,16 @@ MIN_CANDIDATES = 50
 VECTOR_DEPTH_MULTIPLIER = 2
 MIN_VECTOR_DEPTH = 20
 
+# What a stage usually costs, for deciding whether to start it at all. Local
+# figures are measured — a replay of the atlas suite's 44 questions puts
+# diffusion at a 9.4 ms p95, everything else under 1 — and the round trip is an
+# estimate, because it is somebody else's network and this corpus's runs serve
+# it from a cache. The query log now records `stage_ms` per turn, so a later
+# step can replace the estimate with the deployment's own p50 instead of a
+# constant chosen here.
+TYPICAL_EMBED_MS = 120.0
+TYPICAL_DIFFUSE_MS = 10.0
+
 
 @dataclass(frozen=True)
 class RetrievalOptions:
@@ -221,21 +231,30 @@ def search(
     documents: list[Document] | None = None,
     options: RetrievalOptions | None = None,
     index: SearchIndex | None = None,
+    budget: "Budget | None" = None,
     deadline: Deadline | None = None,
     sink: Sink = NULL_SINK,
 ) -> SearchResponse:
     """Rank `query` over the project.
 
-    `deadline` is the turn's remaining time, shared by every stage below. Its
-    absence is the shipped text path — no budget, nothing expires — and its
-    presence never fails the turn: each stage that cannot be afforded falls back
-    to the one below it and says so, because a spoken answer built from the
-    lexical lane alone is worth more than a better answer nobody waited for.
+    `budget` is the knob: a caller states what the turn may cost and the pipeline
+    decides what fits, rather than choosing a profile name and hoping it means
+    the right thing on this corpus. `deadline` is the same thing with the clock
+    already running, for a caller that spent part of the turn before retrieval
+    started — a query rewrite, say — because a deadline each stage restarts is
+    not a deadline.
+
+    Neither ever fails the turn. On the fast path a stage that cannot be
+    afforded falls back to the one below it and says so, because a spoken answer
+    built from the lexical lane alone is worth more than a better answer nobody
+    waited for; on the slow path nothing is dropped and the overrun is recorded.
     """
     if not query.strip():
         return SearchResponse(results=[], mode="keyword")
 
     options = options or RetrievalOptions()
+    if deadline is None and budget is not None:
+        deadline = Deadline(budget.stages(), path=budget.path)
     limit = max(1, min(top_k, MAX_TOP_K))
     depth = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
     stages: dict[str, float] = {}
@@ -266,16 +285,25 @@ def search(
     vector_hits = 0
     query_vector: list[float] | None = None
     if options.vector and embedding_config is not None:
-        if deadline is not None and not deadline.affords("embedding"):
+        if (
+            deadline is not None
+            and deadline.may_degrade
+            and not deadline.affords("embedding", TYPICAL_EMBED_MS)
+            and not _lexical_found_nothing(index, lexical_ranked, options)
+        ):
             # The `ProviderError` branch below is the right fallback and this is
             # a deadline in front of it: the same degradation to lexical+graph,
             # reached before the round trip rather than after waiting out its
             # timeout.
+            # … except when the lexical lane found nothing, which the guard
+            # above checks: then the vector lane is the only lane there is, and
+            # a budget that drops it has not degraded the answer, it has
+            # removed it.
             lanes.expired += ("vector",)
             sink.stage("embed", 0.0, EXPIRED)
             notes.append(
-                "the query embedding was skipped: the turn's budget was spent "
-                "before it could run, so this ranking is the lexical lane's"
+                "the query embedding was skipped: the turn's budget did not "
+                "cover a round trip, so this ranking is the lexical lane's"
             )
         elif not (embedding_config.enabled and embedding_config.model):
             notes.append("vector search is not configured — no embedding model")
@@ -370,14 +398,18 @@ def search(
         # of entity mentions on the strength of no lexical evidence whatever —
         # which on the keyword-hostile suite costs 0.03 recall at k=3 and 64 ms.
         lanes.abstained += ("graph",)
-    elif options.graph_ppr and fused and deadline is not None and not deadline.affords(
-        "neighbourhood"
+    elif (
+        options.graph_ppr
+        and fused
+        and deadline is not None
+        and deadline.may_degrade
+        and not deadline.affords("neighbourhood", TYPICAL_DIFFUSE_MS)
     ):
         # `graph_gate` already knows how to run without diffusion; this is the
-        # same path, reached for a different reason. Diffusion is the rung most
-        # worth dropping under a deadline: it is the one that costs tens of
-        # milliseconds and the one whose absence leaves a ranking rather than
-        # nothing.
+        # same path, reached for a different reason. It is also the *last* rung a
+        # budget drops, not the first: ~8 ms of local CPU against a round trip
+        # for the vector lane, and it is what carries multi-hop. The shipped
+        # `voice` profile had this backwards.
         lanes.expired += ("graph",)
         sink.stage("diffuse", 0.0, EXPIRED)
         notes.append(
@@ -706,5 +738,24 @@ def _looks_like_a_timeout(exc: Exception) -> bool:
     """
     text = str(exc).lower()
     return "timed out" in text or "timeout" in text
+
+
+
+
+def _lexical_found_nothing(
+    index: SearchIndex, lexical_ranked: list[tuple[str, float]], options: RetrievalOptions
+) -> bool:
+    """Whether the lexical lane's best score is under this corpus's own fence.
+
+    Asked *before* the vector lane runs, which is the only place it can be
+    asked: the gate itself needs a second lane to fall back on, so by the time
+    it fires the round trip has already been paid for. A budget deciding whether
+    to skip that round trip needs the same evidence one stage earlier.
+    """
+    if not options.lexical_gate:
+        return not lexical_ranked
+    if not lexical_ranked:
+        return True
+    return index.calibration().abstains(lexical_ranked[0][1], options.abstain_quantile)
 
 

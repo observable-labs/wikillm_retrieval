@@ -9,7 +9,7 @@ import pytest
 from llmwiki.config import StageBudgets
 from llmwiki.errors import ProviderError
 from llmwiki.retrieval import RetrievalOptions, search
-from llmwiki.retrieval.profiles import resolve as resolve_profile
+from llmwiki.retrieval.profiles import Budget, resolve as resolve_profile
 from llmwiki.retrieval.telemetry import EXPIRED, OK, Deadline, RecordingSink
 
 
@@ -74,10 +74,12 @@ def test_no_turn_budget_means_nothing_expires_and_stage_budgets_still_apply():
 
 
 def test_only_the_spoken_profile_carries_a_turn_deadline():
-    assert resolve_profile("voice").budgets.turn == 400.0
-    assert resolve_profile("voice").budgets.embedding == 60.0
+    voice = resolve_profile("voice").budget
+    assert voice.total_ms == 400 and voice.path == "fast"
+    assert voice.stages().embedding == 60.0
     for name in ("balanced", "deep", "research"):
-        assert resolve_profile(name).budgets.turn is None
+        assert resolve_profile(name).budget.total_ms is None
+        assert resolve_profile(name).budget.path == "slow"
 
 
 # ── the fallbacks ─────────────────────────────────────────────────────────
@@ -93,7 +95,7 @@ def test_a_spent_turn_skips_the_embedding_and_answers_from_the_lexical_lane(
 
     monkeypatch.setattr("llmwiki.embeddings.embed_query", never_called)
 
-    deadline = Deadline(StageBudgets(turn=100.0, embedding=60.0))
+    deadline = Deadline(StageBudgets(turn=100.0, embedding=60.0), path="fast")
     deadline.started -= 0.2
     response = search(
         wiki, "storage", include_sources=False,
@@ -105,7 +107,7 @@ def test_a_spent_turn_skips_the_embedding_and_answers_from_the_lexical_lane(
     # ranking that remains is the lexical lane's.
     assert response.lanes.expired == ("vector", "graph")
     assert response.lanes.vector is False
-    assert any("budget was spent" in note for note in response.notes)
+    assert any("did not cover a round trip" in note for note in response.notes)
 
 
 def test_a_blackholed_endpoint_falls_back_inside_the_budget_rather_than_its_timeout(
@@ -130,7 +132,7 @@ def test_a_blackholed_endpoint_falls_back_inside_the_budget_rather_than_its_time
     response = search(
         wiki, "storage", include_sources=False,
         embedding_config=settings.embedding,
-        deadline=Deadline(StageBudgets.voice()),
+        deadline=Deadline(StageBudgets.voice(), path="fast"),
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
@@ -154,15 +156,15 @@ def test_an_endpoint_that_refuses_is_a_failure_and_not_an_expiry(wiki, settings,
     response = search(
         wiki, "storage", include_sources=False,
         embedding_config=settings.embedding,
-        deadline=Deadline(StageBudgets.voice()),
+        deadline=Deadline(StageBudgets.voice(), path="fast"),
     )
     assert response.lanes.expired == ()
     assert any("vector search unavailable" in note for note in response.notes)
 
 
-def test_diffusion_is_the_first_thing_dropped_when_the_clock_runs_out(wiki, settings):
+def test_diffusion_goes_last_and_only_when_there_is_no_room_at_all(wiki, settings):
     _corpus(wiki)
-    deadline = Deadline(StageBudgets(turn=50.0, neighbourhood=15.0))
+    deadline = Deadline(StageBudgets(turn=50.0, neighbourhood=15.0), path="fast")
     deadline.started -= 0.1
 
     response = search(
@@ -222,3 +224,113 @@ def test_a_failing_stage_is_recorded_as_failed_and_not_as_a_duration(wiki, setti
         search(wiki, "storage", include_sources=False, sink=sink)
 
     assert sink.outcomes("fuse") == ["failed"]
+
+
+# ── the budget as the knob (A3) ───────────────────────────────────────────
+
+def test_a_number_chooses_the_path_and_the_call_ceiling():
+    fast = Budget.for_ms(40)
+    assert (fast.total_ms, fast.path, fast.max_llm_calls) == (40, "fast", 2)
+    slow = Budget.for_ms(4_000)
+    assert (slow.total_ms, slow.path, slow.max_llm_calls) == (4_000, "slow", 4)
+    assert Budget.for_ms(None).total_ms is None
+
+    # A fast path that adds a round trip is a construction error rather than a
+    # tuning opinion — which is the whole reason the path is a field.
+    with pytest.raises(ValueError):
+        Budget(total_ms=40, path="fast", max_llm_calls=3)
+    with pytest.raises(ValueError):
+        Budget(total_ms=None, path="fast")
+
+
+def test_a_budget_keeps_the_profile_s_lanes_and_changes_only_the_wall():
+    voice = resolve_profile("voice")
+    at_40 = voice.with_budget(40)
+    assert at_40.options == voice.options
+    assert at_40.budget.total_ms == 40 and at_40.budget.path == "fast"
+    assert voice.budget.total_ms == 400, "profiles are frozen; the copy carries the change"
+
+
+def test_forty_milliseconds_drops_the_round_trip_and_keeps_the_local_rung(
+    wiki, settings, monkeypatch
+):
+    """The ordering A3 corrects, as a test.
+
+    The graph lane is ~8 ms of local CPU and carries multi-hop; the vector lane
+    is somebody else's network. So the round trip is the first thing a budget
+    makes conditional and diffusion is the last thing it drops — the opposite of
+    what the shipped `voice` profile did.
+    """
+    _corpus(wiki)
+    _with_vectors(wiki, settings, monkeypatch)
+
+    calls: list[float | None] = []
+
+    def recording_embed(_text, _config, timeout=None):
+        calls.append(timeout)
+        return [1.0, 0.0]
+
+    monkeypatch.setattr("llmwiki.embeddings.embed_query", recording_embed)
+
+    at_40 = search(
+        wiki, "storage", include_sources=False,
+        embedding_config=settings.embedding,
+        budget=resolve_profile("voice").with_budget(40).budget,
+    )
+    assert calls == [], "a 40 ms turn makes no round trip at all"
+    assert at_40.lanes.expired == ("vector",)
+    assert at_40.lanes.graph is True, "the cheap local rung survives the tight budget"
+    assert at_40.results
+
+    at_400 = search(
+        wiki, "storage", include_sources=False,
+        embedding_config=settings.embedding,
+        budget=resolve_profile("voice").budget,
+    )
+    assert len(calls) == 1, "the same profile at 400 ms affords the round trip"
+    assert calls[0] == pytest.approx(0.06, abs=0.01), "and hands it the stage's share, in seconds"
+    assert at_400.lanes.vector is True
+    assert at_400.lanes.expired == ()
+
+
+def test_the_slow_path_drops_nothing_and_records_the_overrun_instead(
+    wiki, settings, monkeypatch
+):
+    _corpus(wiki)
+    _with_vectors(wiki, settings, monkeypatch)
+    monkeypatch.setattr(
+        "llmwiki.embeddings.embed_query", lambda _t, _c, timeout=None: [1.0, 0.0]
+    )
+    sink = RecordingSink()
+
+    response = search(
+        wiki, "storage", include_sources=False,
+        embedding_config=settings.embedding,
+        # A slow-path turn with a wall it cannot possibly meet.
+        budget=Budget(total_ms=2_000, path="slow", max_llm_calls=4),
+        deadline=Deadline(StageBudgets.for_turn(2_000), path="slow"),
+        sink=sink,
+    )
+    assert response.lanes.expired == (), "the slow path may not drop a lane"
+    assert response.lanes.vector is True
+
+
+def test_the_vector_lane_survives_a_budget_when_it_is_the_only_lane_left(
+    wiki, settings, monkeypatch
+):
+    """A budget that drops the last lane has not degraded the answer, it removed it."""
+    _corpus(wiki)
+    _with_vectors(wiki, settings, monkeypatch)
+    monkeypatch.setattr(
+        "llmwiki.embeddings.embed_query", lambda _t, _c, timeout=None: [1.0, 0.0]
+    )
+
+    # A query with no handhold in this corpus's vocabulary: the lexical lane
+    # scores under the fence, so it is the vector lane or nothing.
+    response = search(
+        wiki, "why does the thing take so long to get going", include_sources=False,
+        embedding_config=settings.embedding,
+        budget=Budget.for_ms(40),
+    )
+    assert response.lanes.vector is True
+    assert "vector" not in response.lanes.expired

@@ -102,6 +102,7 @@ def ask(
     on_token=None,
     profile: str | None = None,
     options=None,
+    budget_ms: int | None = None,
 ) -> Answer:
     """Retrieve over the whole project, then answer with citations.
 
@@ -111,12 +112,17 @@ def ask(
     on the vector lane, for questions asked before the user knows what the
     corpus calls things. `options` overrides it outright, for a caller — an
     ablation, a harness — holding a configuration rather than a name.
+
+    `budget_ms` states the wall clock instead of choosing a name for one. The
+    profile still says which lanes this turn is about; the number says how much
+    of them fits, and below a second it also selects the fast path's contract —
+    drop a rung rather than miss the wall.
     """
     from .retrieval import log as query_log
     from .retrieval.profiles import resolve as resolve_profile
 
     include = settings.search_sources if include_sources is None else include_sources
-    resolved = resolve_profile(profile)
+    resolved = resolve_profile(profile).with_budget(budget_ms)
     selected = options if options is not None else resolved.options
     response = search(
         project,

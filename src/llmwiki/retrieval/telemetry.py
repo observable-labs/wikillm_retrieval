@@ -119,6 +119,10 @@ class Deadline:
 
     budgets: object  # config.StageBudgets; typed loosely to keep the import one-way
     started: float = field(default_factory=perf_counter)
+    # Which contract this turn is under. `fast` may drop a lane and must answer;
+    # `slow` may drop nothing and spends more instead. The clock carries it
+    # because the clock is what every stage already asks.
+    path: str = "slow"
 
     @property
     def elapsed_ms(self) -> float:
@@ -147,10 +151,33 @@ class Deadline:
             return float(stage_budget)
         return min(float(stage_budget), remaining)
 
-    def affords(self, name: str) -> bool:
-        """Whether the stage has any time at all. An expired turn affords nothing."""
+    @property
+    def may_degrade(self) -> bool:
+        """Whether this turn is allowed to answer with fewer lanes."""
+        return self.path == "fast"
+
+    def can_spend(self, typical_ms: float) -> bool:
+        """Whether the turn can still afford a stage that usually costs this much.
+
+        Against the *turn's* remainder rather than the stage's own share, and
+        that distinction is the ladder's ordering. A stage share is a ceiling on
+        waiting for somebody else's network; whether a local rung is worth
+        starting is a question about the time left, and diffusion at ~8 ms fits
+        inside a 40 ms turn whose proportional share of it would be 1.5.
+
+        A stage whose typical cost exceeds what is left is skipped and recorded,
+        rather than started and abandoned — an abandoned stage has spent the
+        budget and produced nothing.
+        """
+        remaining = self.remaining_ms()
+        return remaining is None or remaining >= typical_ms
+
+    def affords(self, name: str, typical_ms: float = 0.0) -> bool:
+        """Whether `name` has both a share to spend and a turn to spend it in."""
         budget = self.for_stage(name)
-        return budget is None or budget > 0.0
+        if budget is not None and budget <= 0.0:
+            return False
+        return self.can_spend(typical_ms)
 
 
 __all__ = [

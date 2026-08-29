@@ -13,6 +13,20 @@
 #
 # ⛔ This runs the harness's script, not a copy of it. If what CI runs and what
 # a person runs can differ, the gate is a description of a gate.
+#
+# ⛔⛔ **This workflow is INERT until the harness has a repository of its own.**
+# Measured 2026-08-29: `EvalRAG/.git` and `EvalRAG/wikillm_retrieval/.git` have
+# the SAME remote — `observable-labs/wikillm_retrieval` — and their `main`
+# branches have **no common ancestor**. So there is no `observable-labs/EvalRAG`
+# to check out, and the harness's own history has never been pushed anywhere.
+#
+# That is the S3 topology `04-packaging-and-distribution.md` §2 rules out, and
+# this file is one of the things that cannot work under it. The checkout below
+# is therefore driven by a repository variable rather than a hard-coded name:
+# set `EVALRAG_REPOSITORY` once the split of §2 lands, and this job starts
+# working with no edit here. Until then it fails at the checkout step with a
+# name that says why, which is the correct outcome — a cross-repo gate that
+# cannot see the other repository must not report green.
 
 name: check
 
@@ -31,9 +45,13 @@ jobs:
 
       # The harness, checked out beside this package — the same sibling layout
       # `check.sh` resolves through `LLMWIKI_ROOT:-$HERE/../wikillm_retrieval`.
+      #
+      # ⚠️ `vars.EVALRAG_REPOSITORY` does not exist yet; see the header. When the
+      # harness gets its own repository, set it and delete this comment.
       - uses: actions/checkout@v4
         with:
-          repository: observable-labs/EvalRAG
+          repository: ${{ vars.EVALRAG_REPOSITORY || 'observable-labs/EvalRAG' }}
+          ref: ${{ vars.EVALRAG_REF || '' }}
           path: EvalRAG
           token: ${{ secrets.EVALRAG_TOKEN || github.token }}
 

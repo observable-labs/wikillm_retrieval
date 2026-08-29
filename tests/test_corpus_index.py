@@ -10,6 +10,8 @@ not a re-description of the default.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from llmwiki.retrieval import (
@@ -437,3 +439,54 @@ def test_pruning_an_index_twice_is_a_no_op():
     index = build_entity_index(documents)
     assert hub_entities(index.mentions, index.documents) == set()
     assert prune_hubs(index).mentions.keys() == index.mentions.keys()
+
+
+# ── the delegation must not move the budget clock ─────────────────────────
+
+def test_search_starts_the_turn_clock_before_it_opens_the_index(monkeypatch, tmp_path):
+    """⛔ A regression the split introduced once, and the reason `search` builds the Deadline.
+
+    `Deadline.started` is set at construction. Opening the index is the stage the response
+    docstring calls "amortised and occasionally the whole turn"; if `search` left the clock to
+    `search_index`, that time would fall outside the turn and a budget that should have dropped
+    a lane would silently afford it. Byte-identical rankings would not have shown it.
+    """
+    from llmwiki.retrieval import pipeline
+    from llmwiki.retrieval.profiles import Budget
+
+    observed: list[float] = []
+    real_open = pipeline.open_index
+
+    def slow_open(*args, **kwargs):
+        time.sleep(0.05)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "open_index", slow_open)
+    real_deadline = pipeline.Deadline
+
+    def recording_deadline(*args, **kwargs):
+        deadline = real_deadline(*args, **kwargs)
+        observed.append(deadline.started)
+        return deadline
+
+    monkeypatch.setattr(pipeline, "Deadline", recording_deadline)
+
+    project = _project_with(tmp_path)
+    started_at = time.perf_counter()
+    pipeline.search(project, "station keeping", budget=Budget.for_ms(400), embedding_config=None)
+
+    assert observed, "search must build a Deadline when given a budget"
+    assert observed[0] - started_at < 0.05, (
+        "the turn clock started after the index open, so a 50 ms open was free to the budget"
+    )
+
+
+def _project_with(tmp_path):
+    """A minimal on-disk project, so `search` takes its real open_index path."""
+    from llmwiki.project import create
+
+    project = create(tmp_path / "wiki")
+    (project.wiki_dir / "station-keeping.md").write_text(
+        "# Station Keeping\n\nStation keeping holds a satellite in its slot.\n", encoding="utf-8"
+    )
+    return project

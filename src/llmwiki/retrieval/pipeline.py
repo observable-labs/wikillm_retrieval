@@ -278,6 +278,15 @@ def search(
         return SearchResponse(results=[], mode="keyword")
 
     options = options or RetrievalOptions()
+    # ⛔ The deadline is built HERE, before the index is opened, and not left to
+    # `search_index`. `Deadline.started` is set at construction, and opening the
+    # index is the stage this module's own `SearchResponse` docstring calls
+    # "amortised and occasionally the whole turn" — 33 ms on a 78-document
+    # corpus, cold. Building it afterwards hands the turn a clock that does not
+    # include the largest thing it may have just paid for, so a budget that
+    # should have dropped a lane silently affords it.
+    if deadline is None and budget is not None:
+        deadline = Deadline(budget.stages(), path=budget.path)
     stages: dict[str, float] = {}
     if index is None:
         with _stage(stages, "open", sink):
@@ -374,6 +383,8 @@ def search_index(
         return SearchResponse(results=[], mode="keyword")
 
     options = options or RetrievalOptions()
+    # For a caller that arrives with a budget and no clock. `search` builds its
+    # own first, so that the index open it pays for is inside the turn.
     if deadline is None and budget is not None:
         deadline = Deadline(budget.stages(), path=budget.path)
     limit = max(1, min(top_k, MAX_TOP_K))

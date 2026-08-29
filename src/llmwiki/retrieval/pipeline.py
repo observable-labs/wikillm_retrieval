@@ -22,8 +22,10 @@ is a fact about the run, not something to infer from hit counts.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 
 from ..config import EmbeddingConfig
 from ..errors import ProviderError
@@ -161,6 +163,35 @@ class SearchResponse:
     lanes: LanesRun = field(default_factory=LanesRun)
     entities: EntityIndex | None = None
     index_seconds: float = 0.0
+    # ── the telemetry seam ────────────────────────────────────────────
+    # Per-stage milliseconds. Named stages rather than one wall clock because
+    # the four costs here have four different owners: opening the index is
+    # amortised and occasionally the whole turn, the embedding is somebody
+    # else's network, and ranking and diffusion are the only parts this
+    # repository can move. A budget cannot be set against a number that mixes
+    # them, and every later percentile is measured from this map.
+    stage_ms: dict[str, float] = field(default_factory=dict)
+    # What the abstention fence was compared to, and what it decided. The score
+    # is kept alongside the verdict because a lane that scored just under the
+    # fence and one that found nothing at all are the same `gate_fired` and
+    # different queries — which is the distinction a gap queue is built on.
+    lexical_top: float | None = None
+    vector_top: float | None = None
+    gate_fired: bool = False
+    # The query embedding, when the vector lane ran. Kept so that clustering the
+    # log later does not re-pay a provider call this turn already made.
+    query_vector: list[float] | None = None
+
+
+@contextmanager
+def _stage(stages: dict[str, float], name: str):
+    """Time one stage into `stages`, accumulating across repeat entries."""
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = (perf_counter() - started) * 1000.0
+        stages[name] = round(stages.get(name, 0.0) + elapsed, 3)
 
 
 def search(
@@ -179,13 +210,15 @@ def search(
     options = options or RetrievalOptions()
     limit = max(1, min(top_k, MAX_TOP_K))
     depth = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
+    stages: dict[str, float] = {}
     if index is None:
-        index = open_index(
-            project,
-            include_sources=include_sources,
-            documents=documents,
-            lexical=options.lexical_bm25,
-        )
+        with _stage(stages, "open"):
+            index = open_index(
+                project,
+                include_sources=include_sources,
+                documents=documents,
+                lexical=options.lexical_bm25,
+            )
     notes: list[str] = []
     lanes = LanesRun()
 
@@ -194,7 +227,8 @@ def search(
     query_phrase = trim_query_punctuation(query.lower())
 
     # ── S1a: lexical ──────────────────────────────────────────────────
-    lexical_ranked = _lexical_lane(index, query, effective_tokens, query_phrase, depth, options)
+    with _stage(stages, "lexical"):
+        lexical_ranked = _lexical_lane(index, query, effective_tokens, query_phrase, depth, options)
     lanes.lexical = True
     lexical_rank = {path: rank for rank, (path, _) in enumerate(lexical_ranked, start=1)}
 
@@ -202,6 +236,7 @@ def search(
     vector_rank: dict[str, int] = {}
     vector_score: dict[str, float] = {}
     vector_hits = 0
+    query_vector: list[float] | None = None
     if options.vector and embedding_config is not None:
         if not (embedding_config.enabled and embedding_config.model):
             notes.append("vector search is not configured — no embedding model")
@@ -211,7 +246,7 @@ def search(
             )
         else:
             try:
-                vector_hits, covered = _vector_lane(
+                vector_hits, covered, query_vector = _vector_lane(
                     project,
                     query,
                     embedding_config,
@@ -219,6 +254,7 @@ def search(
                     or max(limit * VECTOR_DEPTH_MULTIPLIER, MIN_VECTOR_DEPTH),
                     vector_rank,
                     vector_score,
+                    stages,
                 )
                 lanes.vector = True
                 if covered < len(index.documents):
@@ -242,8 +278,10 @@ def search(
     # because a ranking from a lane that found little is still better than no
     # ranking at all.
     abstain = False
+    lexical_top = lexical_ranked[0][1] if lexical_ranked else None
     if options.lexical_gate and vector_rank and lexical_ranked:
-        calibration = index.calibration()
+        with _stage(stages, "calibrate"):
+            calibration = index.calibration()
         top_score = lexical_ranked[0][1]
         if calibration.abstains(top_score, options.abstain_quantile):
             abstain = True
@@ -258,14 +296,15 @@ def search(
             )
             lexical_rank = {}
 
-    fused = _fuse(
-        lexical_rank,
-        vector_rank,
-        index,
-        options.rrf_k,
-        options.lexical_weight,
-        options.vector_weight,
-    )
+    with _stage(stages, "fuse"):
+        fused = _fuse(
+            lexical_rank,
+            vector_rank,
+            index,
+            options.rrf_k,
+            options.lexical_weight,
+            options.vector_weight,
+        )
 
     # ── S2: seeded PPR ────────────────────────────────────────────────
     ranked = fused[:limit]
@@ -277,46 +316,48 @@ def search(
         # which on the keyword-hostile suite costs 0.03 recall at k=3 and 64 ms.
         lanes.abstained += ("graph",)
     elif options.graph_ppr and fused:
-        adjacency = index.adjacency(
-            entity_edges=options.entity_edges,
-            curated_links=options.curated_links,
-            mentions_per_document=options.mentions_per_document,
-            mention_scale=options.mention_scale,
-        )
-        if adjacency:
-            already_fused = {path for path, _ in fused}
-            ranked = rank_by_ppr(
-                fused,
-                None,
-                limit=limit,
-                seed_count=options.seed_count,
-                tail_weight=options.tail_weight,
-                alpha=options.alpha,
-                iterations=options.iterations,
-                self_weight=options.self_weight,
-                keep=set(index.by_path),
-                outgoing=index.transitions(
-                    entity_edges=options.entity_edges,
-                    curated_links=options.curated_links,
-                    mentions_per_document=options.mentions_per_document,
-                    self_weight=options.self_weight,
-                    mention_scale=options.mention_scale,
-                ),
+        with _stage(stages, "diffuse"):
+            adjacency = index.adjacency(
+                entity_edges=options.entity_edges,
+                curated_links=options.curated_links,
+                mentions_per_document=options.mentions_per_document,
+                mention_scale=options.mention_scale,
             )
-            lanes.graph = True
-            graph_hits = sum(1 for path, _ in ranked if path not in already_fused)
+            if adjacency:
+                already_fused = {path for path, _ in fused}
+                ranked = rank_by_ppr(
+                    fused,
+                    None,
+                    limit=limit,
+                    seed_count=options.seed_count,
+                    tail_weight=options.tail_weight,
+                    alpha=options.alpha,
+                    iterations=options.iterations,
+                    self_weight=options.self_weight,
+                    keep=set(index.by_path),
+                    outgoing=index.transitions(
+                        entity_edges=options.entity_edges,
+                        curated_links=options.curated_links,
+                        mentions_per_document=options.mentions_per_document,
+                        self_weight=options.self_weight,
+                        mention_scale=options.mention_scale,
+                    ),
+                )
+                lanes.graph = True
+                graph_hits = sum(1 for path, _ in ranked if path not in already_fused)
 
-    results = _materialize(
-        ranked,
-        index=index,
-        seeds={path for path, _ in fused[: max(1, options.seed_count or limit)]},
-        fused={path for path, _ in fused},
-        vector_score=vector_score,
-        tokens=effective_tokens,
-        query_phrase=query_phrase,
-        query=query,
-        options=options,
-    )
+    with _stage(stages, "materialize"):
+        results = _materialize(
+            ranked,
+            index=index,
+            seeds={path for path, _ in fused[: max(1, options.seed_count or limit)]},
+            fused={path for path, _ in fused},
+            vector_score=vector_score,
+            tokens=effective_tokens,
+            query_phrase=query_phrase,
+            query=query,
+            options=options,
+        )
 
     return SearchResponse(
         results=results,
@@ -330,6 +371,11 @@ def search(
         lanes=lanes,
         entities=index.entities,
         index_seconds=index.build_seconds,
+        stage_ms=stages,
+        lexical_top=lexical_top,
+        vector_top=max(vector_score.values()) if vector_score else None,
+        gate_fired=abstain,
+        query_vector=query_vector,
     )
 
 
@@ -368,23 +414,32 @@ def _vector_lane(
     depth: int,
     vector_rank: dict[str, int],
     vector_score: dict[str, float],
-) -> tuple[int, int]:
-    """Returns (pages ranked, documents the index covers)."""
+    stages: dict[str, float] | None = None,
+) -> tuple[int, int, list[float] | None]:
+    """Returns (pages ranked, documents the index covers, the query vector).
+
+    The embedding round trip is timed apart from the scan it feeds: one is a
+    provider's network and the other is a dot-product pass over local rows, and
+    a turn that is late is late in one of them.
+    """
     from ..embeddings import VectorStore, embed_query, group_by_page
 
+    stages = {} if stages is None else stages
     store_path = Path(project.state_dir) / "vectors.db"
-    query_vector = embed_query(query, embedding_config)
-    with VectorStore(store_path) as store:
-        chunk_hits = store.search(query_vector, max(depth * 3, 30))
-        covered, _chunks = store.count()
-    if not chunk_hits:
-        return 0, covered
+    with _stage(stages, "embed"):
+        query_vector = embed_query(query, embedding_config)
+    with _stage(stages, "vector"):
+        with VectorStore(store_path) as store:
+            chunk_hits = store.search(query_vector, max(depth * 3, 30))
+            covered, _chunks = store.count()
+        if not chunk_hits:
+            return 0, covered, query_vector
 
-    page_hits = group_by_page(chunk_hits, depth)
-    for rank, page in enumerate(page_hits, start=1):
-        vector_rank[page.page_id] = rank
-        vector_score[page.page_id] = page.score
-    return len(page_hits), covered
+        page_hits = group_by_page(chunk_hits, depth)
+        for rank, page in enumerate(page_hits, start=1):
+            vector_rank[page.page_id] = rank
+            vector_score[page.page_id] = page.score
+    return len(page_hits), covered, query_vector
 
 
 def _fuse(

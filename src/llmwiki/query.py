@@ -112,6 +112,7 @@ def ask(
     corpus calls things. `options` overrides it outright, for a caller — an
     ablation, a harness — holding a configuration rather than a name.
     """
+    from .retrieval import log as query_log
     from .retrieval.profiles import resolve as resolve_profile
 
     include = settings.search_sources if include_sources is None else include_sources
@@ -124,10 +125,24 @@ def ask(
         embedding_config=settings.embedding,
         options=selected,
     )
-    return answer_from(
+    answer = answer_from(
         project, question, settings, response,
         history=history, on_token=on_token,
     )
+    # After the answer, never before: the citation parse is what makes `cited`
+    # a relevance judgement rather than a copy of `retrieved`, and a log write
+    # that happened first could only have recorded the weaker of the two. It is
+    # also the ordering that keeps a logging failure off the user's turn.
+    note = query_log.record(
+        project,
+        question,
+        response,
+        profile="custom" if options is not None else resolve_profile(profile).name,
+        cited=[c.path for c in answer.citations if c.cited],
+    )
+    if note:
+        answer.notes = [*answer.notes, note]
+    return answer
 
 
 def answer_from(

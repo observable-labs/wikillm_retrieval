@@ -186,7 +186,13 @@ def create(path: Path | str, template_id: str = DEFAULT_TEMPLATE, name: str | No
         "# Overview\n\n"
         "<!-- A high-level summary of what this wiki covers. Regenerated as it grows. -->\n",
     )
-    project.write(f"{STATE_DIR}/.gitignore", "vectors.db\n*.log\n")
+    # The query log holds the user's questions verbatim and this directory is
+    # inside their own repo. A wiki that is shared is not a query log that is
+    # shared; committing it is a deliberate act, which means deleting a line.
+    project.write(
+        f"{STATE_DIR}/.gitignore",
+        "vectors.db\nquery-log.db\nquery-log.db-*\n*.log\n",
+    )
     project.save_settings({"template": template_id, "name": name or root.name})
 
     # Obsidian reads the same directory as a vault; point attachments at

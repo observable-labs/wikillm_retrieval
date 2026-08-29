@@ -274,16 +274,26 @@ def _via(names: list[str], limit: int = 3) -> str:
 def cmd_search(args, printer: Printer) -> int:
     project = project_module.open_project(args.project)
     settings = config.load(project.root, _overrides(args))
+    from .retrieval import log as query_log
     from .retrieval.profiles import resolve as resolve_profile
 
+    profile = resolve_profile(getattr(args, "profile", None))
+    query = " ".join(args.query)
     response = search(
         project,
-        " ".join(args.query),
+        query,
         top_k=args.top_k,
         include_sources=settings.search_sources if args.sources is None else args.sources,
         embedding_config=settings.embedding,
-        options=resolve_profile(getattr(args, "profile", None)).options,
+        options=profile.options,
     )
+    # Both paths log. A retrieval-only turn is still a turn — it is the one the
+    # voice path will take — and `cited` stays NULL rather than empty, because
+    # "no answer was generated" and "the answer cited nothing" are different
+    # observations and the write-back loop reads them differently.
+    note = query_log.record(project, query, response, profile=profile.name)
+    if note:
+        response.notes = [*response.notes, note]
 
     if args.json:
         print(
@@ -390,6 +400,10 @@ def cmd_status(args, printer: Printer) -> int:
             stored_pages, stored_chunks = store.count()
         vector_summary = f"{stored_pages} pages / {stored_chunks} chunks"
 
+    from .retrieval import log as query_log
+
+    log_stats = query_log.stats(project)
+
     if args.json:
         print(
             json.dumps(
@@ -403,6 +417,14 @@ def cmd_status(args, printer: Printer) -> int:
                     "effort": _effort_summary(settings.llm),
                     "embedding_model": settings.embedding.model or None,
                     "vectors": vector_summary,
+                    "query_log": None
+                    if log_stats is None
+                    else {
+                        "turns": log_stats.rows,
+                        "first": log_stats.first,
+                        "last": log_stats.last,
+                        "bytes": log_stats.bytes,
+                    },
                 },
                 indent=2,
             )
@@ -420,10 +442,29 @@ def cmd_status(args, printer: Printer) -> int:
         f"vectors   {vector_summary}"
         + (f" · {settings.embedding.model}" if settings.embedding.model else " (disabled)")
     )
+    printer.info(f"queries   {_log_summary(log_stats)}")
     return 0
 
 
 # ── plumbing ──────────────────────────────────────────────────────────────
+
+def _log_summary(stats) -> str:
+    """The query log in one line: how much traffic, over what stretch of time.
+
+    Both halves are the point. A count says whether the write-back loop has
+    anything to learn from; the date range says whether it is this month's
+    traffic or a log nobody has added to since the corpus changed underneath it.
+    """
+    if stats is None:
+        return "no log yet"
+    if not stats.rows:
+        return "0 turns"
+    span = stats.first[:10] if stats.first else "?"
+    if stats.last and stats.last[:10] != span:
+        span = f"{span} → {stats.last[:10]}"
+    turns = f"{stats.rows:,} turn" + ("" if stats.rows == 1 else "s")
+    return f"{turns} · {span} · {stats.bytes / 1024:.0f} KB"
+
 
 def _effort_summary(llm) -> dict[str, str]:
     """What each lane will actually ask the model for.

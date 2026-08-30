@@ -8,17 +8,30 @@ you point the tool at a local Ollama.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from typing import Iterator
 
-from ..errors import ProviderError
+from ..errors import ProviderError, ProviderTransportError
 
 USER_AGENT = "llmwiki/0.1"
 
 
-def _request(url: str, payload: dict, headers: dict[str, str], timeout: float):
+@contextmanager
+def _exchange(url: str, payload: dict, headers: dict[str, str], timeout: float):
+    """Hold one POST open, with the whole exchange under a single error guard.
+
+    Reading the body has to happen inside this guard, not after it. A provider
+    that accepts the request and then stalls raises `TimeoutError` out of
+    `response.read()`, and a proxy that hangs up mid-answer raises
+    `RemoteDisconnected` out of `urlopen` itself. Neither is a `URLError`, so
+    while the guard covered only the connect, both escaped as raw `OSError`
+    and killed the process — a bulk ingest lost the whole run to one slow
+    embedding call.
+    """
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
@@ -27,16 +40,23 @@ def _request(url: str, payload: dict, headers: dict[str, str], timeout: float):
         if value:
             request.add_header(key, value)
     try:
-        return urllib.request.urlopen(request, timeout=timeout)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            yield response
     except urllib.error.HTTPError as exc:
         detail = _error_detail(exc)
         raise ProviderError(f"HTTP {exc.code} from {url}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise ProviderError(f"could not reach {url}: {exc.reason}") from exc
+    except (OSError, http.client.HTTPException) as exc:
+        # Ordered last: URLError and HTTPError are OSErrors too, and keep
+        # their own more specific messages above.
+        raise ProviderTransportError(
+            f"{url} did not finish the exchange: {exc.__class__.__name__}: {exc}"
+        ) from exc
 
 
 def post_json(url: str, payload: dict, headers: dict[str, str], timeout: float) -> dict:
-    with _request(url, payload, headers, timeout) as response:
+    with _exchange(url, payload, headers, timeout) as response:
         raw = response.read().decode("utf-8", errors="replace")
     try:
         return json.loads(raw)
@@ -46,7 +66,7 @@ def post_json(url: str, payload: dict, headers: dict[str, str], timeout: float) 
 
 def post_sse(url: str, payload: dict, headers: dict[str, str], timeout: float) -> Iterator[dict]:
     """Yield parsed `data:` frames until the stream ends or sends [DONE]."""
-    with _request(url, payload, headers, timeout) as response:
+    with _exchange(url, payload, headers, timeout) as response:
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line or line.startswith(":"):

@@ -27,5 +27,15 @@ class ProviderError(LlmWikiError):
     """The LLM or embedding provider rejected the request or was unreachable."""
 
 
+class ProviderTransportError(ProviderError):
+    """The exchange with the provider broke mid-flight: timed out, or the
+    connection dropped before the body arrived.
+
+    Distinct from its parent because the *request* was fine. Callers that
+    respond to a rejection by reshaping the payload must not do that here —
+    a smaller request is not a faster one — and should retry it unchanged.
+    """
+
+
 class IngestError(LlmWikiError):
     """The two-step ingest could not complete for a source."""

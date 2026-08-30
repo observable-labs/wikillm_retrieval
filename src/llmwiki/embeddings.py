@@ -16,18 +16,25 @@ from __future__ import annotations
 import array
 import math
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .chunking import ChunkingOptions, chunk_markdown
 from .config import EmbeddingConfig
-from .errors import ProviderError
+from .errors import ProviderError, ProviderTransportError
 from .llm._http import post_json
 
 try:  # optional accelerator
     import numpy as _np
 except ImportError:  # pragma: no cover - exercised by environment, not tests
     _np = None
+
+# A stalled or dropped embedding call is worth re-sending as-is. Bounded,
+# because a provider that is throttling in earnest should surface as a warning
+# on this one document rather than hold a bulk ingest open indefinitely.
+TRANSPORT_ATTEMPTS = 3
+TRANSPORT_BACKOFF = 2.0  # seconds before the first retry, doubled after each
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -91,6 +98,22 @@ def embed_texts(
     return out
 
 
+def _post_batch(
+    url: str, payload: dict, headers: dict, timeout: float, attempts: int
+) -> dict:
+    """POST one embedding batch, re-sending it unchanged if the exchange breaks."""
+    delay = TRANSPORT_BACKOFF
+    for remaining in range(attempts - 1, -1, -1):
+        try:
+            return post_json(url, payload, headers, timeout)
+        except ProviderTransportError:
+            if not remaining:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable: the loop above always returns or raises")
+
+
 def _embed_batch(
     url: str,
     batch: list[str],
@@ -102,9 +125,23 @@ def _embed_batch(
     if config.dimensions:
         payload["dimensions"] = config.dimensions
     try:
-        response = post_json(
-            url, payload, headers, config.timeout if timeout is None else timeout
+        response = _post_batch(
+            url,
+            payload,
+            headers,
+            config.timeout if timeout is None else timeout,
+            # A query lends this call whatever is left of its turn; spending
+            # that on backoff would blow the very deadline the caller passed
+            # the timeout to protect. Only ingest, which answers to no clock
+            # but its own, retries.
+            attempts=TRANSPORT_ATTEMPTS if timeout is None else 1,
         )
+    except ProviderTransportError:
+        # Never halve on these. The batch was not the problem, and splitting a
+        # timeout turns one stalled call into two, then four: a batch of 32
+        # walked all the way down to single inputs cost an hour of wall clock
+        # per document before failing anyway.
+        raise
     except ProviderError:
         # Some servers cap request size rather than input count; halving the
         # batch is the cheapest way to find the ceiling without configuration.

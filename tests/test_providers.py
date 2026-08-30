@@ -9,15 +9,16 @@ from __future__ import annotations
 import io
 import json
 import threading
+import time
 import urllib.error
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 
 from llmwiki.config import EmbeddingConfig, LLMConfig
-from llmwiki.embeddings import embed_texts
-from llmwiki.errors import ProviderError
-from llmwiki.llm._http import _error_detail
+from llmwiki.embeddings import TRANSPORT_ATTEMPTS, embed_texts
+from llmwiki.errors import ProviderError, ProviderTransportError
+from llmwiki.llm._http import _error_detail, post_json
 from llmwiki.llm.base import Message
 from llmwiki.llm.openai_client import OpenAICompatibleChatClient, _chat_url
 
@@ -258,3 +259,98 @@ def test_anthropic_ignores_the_ingest_off_default():
         client.complete([Message("user", "u")], max_tokens=64)
 
     assert "output_config" not in sent[0]
+
+
+# ── a provider that answers, then stalls ──────────────────────────────────
+#
+# The failure these cover cost a 662-document ingest most of a day. The read
+# that stalls happens *after* the response headers arrive, so nothing urllib
+# raises is a URLError, and `TimeoutError` went straight past a guard that
+# only covered the connect.
+
+
+class _StallHandler(BaseHTTPRequestHandler):
+    """Sends headers promising a body, then never sends the body."""
+
+    received: list = []
+    hold = 1.0
+
+    def do_POST(self):
+        type(self).received.append(
+            json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "4096")
+        self.end_headers()
+        self.wfile.flush()
+        time.sleep(type(self).hold)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def stalling_server():
+    _StallHandler.received = []
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _StallHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    yield httpd, _StallHandler
+    httpd.shutdown()
+
+
+@pytest.fixture
+def instant_backoff(monkeypatch):
+    monkeypatch.setattr("llmwiki.embeddings.TRANSPORT_BACKOFF", 0.01)
+
+
+def test_a_stalled_body_is_a_provider_error_not_a_bare_timeout(stalling_server):
+    """`response.read()` timing out used to escape as OSError and end the run."""
+    httpd, _handler = stalling_server
+    url = f"http://127.0.0.1:{httpd.server_port}/v1/embeddings"
+
+    with pytest.raises(ProviderTransportError, match="did not finish the exchange"):
+        post_json(url, {"input": ["a"]}, {}, timeout=0.3)
+
+    # Everything that already caught the provider's failures still catches it —
+    # in particular the ingest pipeline, which turns it into a per-document
+    # warning rather than a crash.
+    assert issubclass(ProviderTransportError, ProviderError)
+
+
+def test_a_stalled_embedding_retries_the_same_batch_and_never_halves_it(
+    stalling_server, instant_backoff
+):
+    """Halving a timeout turns one stalled call into two, then four."""
+    httpd, handler = stalling_server
+    config = EmbeddingConfig(
+        enabled=True,
+        model="e",
+        base_url=f"http://127.0.0.1:{httpd.server_port}/v1",
+        batch_size=8,
+        timeout=0.3,
+    )
+
+    with pytest.raises(ProviderTransportError):
+        embed_texts([f"chunk {i}" for i in range(8)], config)
+
+    assert len(handler.received) == TRANSPORT_ATTEMPTS
+    # The batch is re-sent whole every time. A halving cascade would show
+    # inputs of 8, 4, 4, 2, 2, ... and 15 requests instead of 3.
+    assert [len(body["input"]) for body in handler.received] == [8] * TRANSPORT_ATTEMPTS
+
+
+def test_a_borrowed_deadline_is_spent_on_the_call_not_on_backoff(
+    stalling_server, instant_backoff
+):
+    """A query lends the embedder what is left of its turn; retries would blow it."""
+    httpd, handler = stalling_server
+    config = EmbeddingConfig(
+        enabled=True, model="e", base_url=f"http://127.0.0.1:{httpd.server_port}/v1"
+    )
+
+    with pytest.raises(ProviderTransportError):
+        embed_texts(["a"], config, timeout=0.3)
+
+    assert len(handler.received) == 1

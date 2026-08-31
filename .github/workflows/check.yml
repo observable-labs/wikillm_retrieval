@@ -1,6 +1,6 @@
 # The mirror. The same `check.sh`, triggered from the side that usually breaks it.
 #
-# ragharness already runs this script (EvalRAG/.github/workflows/check.yml), and
+# ragharness already runs this script (RagEval/.github/workflows/check.yml), and
 # its own header says what it cannot do: the change that breaks the contract is
 # normally a *llmwiki* change, and a workflow in that repository is not
 # triggered by one. Its daily cron bounds the delay at a day; this file removes
@@ -14,19 +14,16 @@
 # ⛔ This runs the harness's script, not a copy of it. If what CI runs and what
 # a person runs can differ, the gate is a description of a gate.
 #
-# ⛔⛔ **This workflow is INERT until the harness has a repository of its own.**
-# Measured 2026-08-29: `EvalRAG/.git` and `EvalRAG/wikillm_retrieval/.git` have
-# the SAME remote — `observable-labs/wikillm_retrieval` — and their `main`
-# branches have **no common ancestor**. So there is no `observable-labs/EvalRAG`
-# to check out, and the harness's own history has never been pushed anywhere.
+# ✅ **The split landed 2026-08-30 and this workflow is live.** It used to say it
+# was INERT, and it was: `EvalRAG/.git` and `EvalRAG/wikillm_retrieval/.git` had
+# the SAME remote — this one — with `main` branches sharing no common ancestor,
+# so there was no harness repository to check out and the harness's own history
+# had never been pushed anywhere. The harness now lives at its own address,
+# `observable-labs/RagEval`, with that history intact.
 #
-# That is the S3 topology `04-packaging-and-distribution.md` §2 rules out, and
-# this file is one of the things that cannot work under it. The checkout below
-# is therefore driven by a repository variable rather than a hard-coded name:
-# set `EVALRAG_REPOSITORY` once the split of §2 lands, and this job starts
-# working with no edit here. Until then it fails at the checkout step with a
-# name that says why, which is the correct outcome — a cross-repo gate that
-# cannot see the other repository must not report green.
+# The checkout below stays driven by `vars.EVALRAG_REPOSITORY` rather than being
+# hard-coded again. The name is now a *default* that works instead of one that
+# never did, which is the only thing that changed about the mechanism.
 
 name: check
 
@@ -39,20 +36,20 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # ⚠️ Both checkouts land UNDER a directory, never at the workspace root,
+      # because `check.sh` resolves this package as `$HERE/../wikillm_retrieval`
+      # from the harness. That sibling relationship is the whole layout contract
+      # — it is what lets CI run the harness's script rather than a copy.
       - uses: actions/checkout@v4
         with:
-          path: EvalRAG/wikillm_retrieval
+          path: wikillm_retrieval
 
-      # The harness, checked out beside this package — the same sibling layout
-      # `check.sh` resolves through `LLMWIKI_ROOT:-$HERE/../wikillm_retrieval`.
-      #
-      # ⚠️ `vars.EVALRAG_REPOSITORY` does not exist yet; see the header. When the
-      # harness gets its own repository, set it and delete this comment.
+      # The harness, checked out beside this package.
       - uses: actions/checkout@v4
         with:
-          repository: ${{ vars.EVALRAG_REPOSITORY || 'observable-labs/EvalRAG' }}
+          repository: ${{ vars.EVALRAG_REPOSITORY || 'observable-labs/RagEval' }}
           ref: ${{ vars.EVALRAG_REF || '' }}
-          path: EvalRAG
+          path: RagEval
           token: ${{ secrets.EVALRAG_TOKEN || github.token }}
 
       - uses: actions/setup-python@v5
@@ -60,14 +57,13 @@ jobs:
           python-version: "3.12"
 
       - name: install both, editable
-        working-directory: EvalRAG
         run: |
           python -m pip install --upgrade pip
-          pip install -e "./evaluation[dev]"
+          pip install -e "./RagEval[dev]"
           pip install -e ./wikillm_retrieval
 
       # No provider key on purpose: the eval smoke runs the lanes that need no
       # network, so the gate never fails for a reason the change did not cause.
       - name: check
-        working-directory: EvalRAG/evaluation
+        working-directory: RagEval
         run: scripts/check.sh
